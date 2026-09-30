@@ -15,8 +15,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("自动发现 CC Switch 配置的本地 API 余额监控")]
 [assembly: AssemblyCompany("Relay Balance contributors")]
 [assembly: AssemblyProduct("Relay Balance Desktop")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace RelayBalanceDesktop
 {
@@ -87,10 +87,74 @@ namespace RelayBalanceDesktop
             {
                 form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-30000,-30000); form.ShowInTaskbar = false;
                 form.Show(); form.ApplySnapshot(DemoSnapshot()); Application.DoEvents();
-                using (Bitmap image = new Bitmap(form.Width, form.Height)) { form.DrawToBitmap(image, new Rectangle(0,0,form.Width,form.Height)); image.Save(Path.Combine(directory,"desktop-preview.png"), ImageFormat.Png); }
+                SavePreview(form, Path.Combine(directory,"desktop-preview.png"));
+                Snapshot failedFirst = DemoSnapshot();
+                ProviderSnapshot failed = failedFirst.providers[failedFirst.providers.Count - 1];
+                failedFirst.providers.RemoveAt(failedFirst.providers.Count - 1); failedFirst.providers.Insert(0,failed);
+                form.ApplySnapshot(new Snapshot { providers=new List<ProviderSnapshot>(), intervalSeconds=300 });
+                form.ApplySnapshot(failedFirst); Application.DoEvents();
+                AssertActionReachable((Button)typeof(BalanceForm).GetField("_retryDetectionButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form));
+                AssertActionReachable((Button)typeof(BalanceForm).GetField("_adapterButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form));
+                SavePreview(form, Path.Combine(directory,"adaptation-preview.png"));
                 form.Close();
             }
             return 0;
+        }
+        private static void SavePreview(Form form,string filename)
+        {
+            using(Bitmap image=new Bitmap(form.Width,form.Height)) { form.DrawToBitmap(image,new Rectangle(0,0,form.Width,form.Height));image.Save(filename,ImageFormat.Png); }
+        }
+        // Visible=true alone does not prove that a user can see or click a button.
+        private static void AssertActionReachable(Button button)
+        {
+            if(!button.Visible || !button.Enabled || String.IsNullOrWhiteSpace(button.Text))throw new Exception("action unavailable: "+button.Text);
+            if(!button.Parent.ClientRectangle.Contains(button.Bounds))throw new Exception("action clipped: "+button.Text);
+            foreach(Control sibling in button.Parent.Controls)
+                if(sibling!=button && sibling.Visible && sibling.Bounds.IntersectsWith(button.Bounds))throw new Exception("action overlapped: "+button.Text+" / "+sibling.GetType().Name);
+            Point center=button.PointToScreen(new Point(button.Width/2,button.Height/2));
+            for(Control child=button;child.Parent!=null;child=child.Parent)
+            {
+                Control hit=child.Parent.GetChildAtPoint(child.Parent.PointToClient(center),GetChildAtPointSkip.Invisible);
+                if(hit!=child)throw new Exception("action click intercepted: "+button.Text);
+            }
+        }
+        private static void TestProviderActions()
+        {
+            using(BackendClient backend=new BackendClient())
+            using(BalanceForm form=new BalanceForm(backend,true))
+            {
+                form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-30000,-30000);form.ShowInTaskbar=false;form.Show();
+                DataGridView grid=(DataGridView)typeof(BalanceForm).GetField("_grid",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form);
+                Button retry=(Button)typeof(BalanceForm).GetField("_retryDetectionButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form);
+                Button manual=(Button)typeof(BalanceForm).GetField("_adapterButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form);
+                Snapshot snapshot=DemoSnapshot();
+                ProviderSnapshot failed=snapshot.providers[snapshot.providers.Count-1];snapshot.providers.RemoveAt(snapshot.providers.Count-1);snapshot.providers.Insert(0,failed);
+                form.ApplySnapshot(snapshot);Application.DoEvents();
+                foreach(int width in new int[]{form.Width,form.Width-22,form.MinimumSize.Width})
+                {
+                    form.Width=width;Application.DoEvents();
+                    for(int round=0;round<3;round++)
+                    {
+                        grid.CurrentCell=grid.Rows[0].Cells[0];form.ApplySnapshot(snapshot);Application.DoEvents();
+                        AssertActionReachable(retry);AssertActionReachable(manual);
+                        grid.CurrentCell=grid.Rows[1].Cells[0];Application.DoEvents();AssertActionReachable(manual);
+                    }
+                }
+                grid.CurrentCell=grid.Rows[0].Cells[0];Application.DoEvents();
+                bool opened=false;Exception modalError=null;
+                using(System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer())
+                {
+                    timer.Interval=100;timer.Tick+=delegate {
+                        foreach(Form window in Application.OpenForms)
+                            if(window!=form && window.GetType().Name=="AdapterDialog") { opened=true;timer.Stop();window.Close();return; }
+                        modalError=new Exception("manual configuration did not open");timer.Stop();
+                    };
+                    timer.Start();manual.PerformClick();timer.Stop();
+                }
+                if(modalError!=null)throw modalError;
+                if(!opened)throw new Exception("manual configuration did not open");
+                form.Close();
+            }
         }
         private static int SelfTest(string directory)
         {
@@ -161,7 +225,8 @@ namespace RelayBalanceDesktop
                     CheckBox notifications=(CheckBox)typeof(BalanceForm).GetField("_notifications",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form);
                     if(notifications.Checked)throw new Exception("notification reload");
                 }
-                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\"]}",new UTF8Encoding(false));
+                TestProviderActions();
+                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\"]}",new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception ex) { File.WriteAllText(report,new JavaScriptSerializer().Serialize(new {passed=false,error=ex.Message}),new UTF8Encoding(false));return 1; }
