@@ -14,6 +14,7 @@ namespace RelayBalanceDesktop
         public string type { get; set; }
         public string path { get; set; }
         public string remainingPath { get; set; }
+        public string amountMode { get; set; }
         public string unit { get; set; }
         public string balanceKind { get; set; }
         public double? divisor { get; set; }
@@ -30,6 +31,7 @@ namespace RelayBalanceDesktop
         public bool unlimited { get; set; }
         public string status { get; set; }
         public string unit { get; set; }
+        public string usageUnit { get; set; }
         public string balanceKindLabel { get; set; }
         public string message { get; set; }
         public string updatedAt { get; set; }
@@ -145,6 +147,14 @@ namespace RelayBalanceDesktop
                 if (!Finite(p.remaining) || !Finite(p.todayUsage) || !Finite(p.totalUsage) || !Finite(p.threshold) || p.threshold < 0) return false;
                 if (p.status != "pending" && p.status != "ok" && p.status != "missing" && p.status != "unsupported" && p.status != "error" && p.status != "stale" && p.status != "disabled") return false;
                 if (p.adapterConfig != null && p.adapterConfig.divisor.HasValue && (!Finite(p.adapterConfig.divisor) || p.adapterConfig.divisor.Value <= 0)) return false;
+                if (p.adapterConfig != null)
+                {
+                    AdapterConfig config = p.adapterConfig;
+                    if (config.amountMode != null && config.amountMode != "auto" && config.amountMode != "manual") return false;
+                    if (config.amountMode == "manual" && config.type != "custom" && (!config.divisor.HasValue || String.IsNullOrEmpty(config.unit)
+                        || !Regex.IsMatch(config.unit, "^(?:[A-Za-z]{2,12}|[¥$€£]|人民币|积分|点数)$")
+                        || (config.balanceKind != "quota" && config.balanceKind != "key" && config.balanceKind != "account"))) return false;
+                }
             }
             if (data.hiddenProviders != null)
                 foreach (HiddenProviderSnapshot hidden in data.hiddenProviders)

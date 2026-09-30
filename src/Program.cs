@@ -15,8 +15,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("自动发现 CC Switch 配置的本地 API 余额监控")]
 [assembly: AssemblyCompany("Relay Balance contributors")]
 [assembly: AssemblyProduct("Relay Balance Desktop")]
-[assembly: AssemblyVersion("1.1.3.0")]
-[assembly: AssemblyFileVersion("1.1.3.0")]
+[assembly: AssemblyVersion("1.1.4.0")]
+[assembly: AssemblyFileVersion("1.1.4.0")]
 
 namespace RelayBalanceDesktop
 {
@@ -91,8 +91,15 @@ namespace RelayBalanceDesktop
                 AssertContentTitleRemoved(form);
                 SavePreview(form, Path.Combine(directory,"desktop-preview.png"));
                 DataGridView previewGrid=FormField<DataGridView>(form,"_grid"); previewGrid.CurrentCell=previewGrid.Rows[3].Cells[0];Application.DoEvents();
+                AssertActionReachable(FormField<Button>(form,"_retryDetectionButton"));
                 SavePreview(form,Path.Combine(directory,"account-unavailable-preview.png"));
                 CaptureHiddenPreview(form,Path.Combine(directory,"hidden-providers-preview.png"));
+                Snapshot manualAmount=DemoSnapshot();manualAmount.providers[0].adapterConfig=new AdapterConfig {type="auto",amountMode="manual",unit="CNY",divisor=500000,balanceKind="account"};manualAmount.providers[0].unit="CNY";manualAmount.providers[0].usageUnit="USD";
+                form.ApplySnapshot(manualAmount);previewGrid.CurrentCell=previewGrid.Rows[0].Cells[0];Application.DoEvents();
+                CaptureAdapterDialog(form,delegate(Form dialog) { SavePreview(dialog,Path.Combine(directory,"manual-amount-preview.png"));dialog.Close(); });
+                manualAmount.providers[0].adapterConfig=new AdapterConfig {type="custom",path="/api/balance",remainingPath="data.balance",unit="CNY",divisor=100,balanceKind="account"};
+                form.ApplySnapshot(manualAmount);Application.DoEvents();
+                CaptureAdapterDialog(form,delegate(Form dialog) { SavePreview(dialog,Path.Combine(directory,"manual-configuration.png"));dialog.Close(); });
                 Snapshot failedFirst = DemoSnapshot();
                 ProviderSnapshot failed = failedFirst.providers[failedFirst.providers.Count - 1];
                 failedFirst.providers.RemoveAt(failedFirst.providers.Count - 1); failedFirst.providers.Insert(0,failed);
@@ -114,6 +121,23 @@ namespace RelayBalanceDesktop
             using(Bitmap image=new Bitmap(form.Width,form.Height)) { form.DrawToBitmap(image,new Rectangle(0,0,form.Width,form.Height));image.Save(filename,ImageFormat.Png); }
         }
         private static T FormField<T>(BalanceForm form,string name) { return (T)typeof(BalanceForm).GetField(name,BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form); }
+        private static T DialogField<T>(Form form,string name) { return (T)form.GetType().GetField(name,BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form); }
+        private static void CaptureAdapterDialog(BalanceForm form,Action<Form> action)
+        {
+            bool opened=false;Exception failure=null;
+            using(System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer())
+            {
+                timer.Interval=100;timer.Tick+=delegate {
+                    foreach(Form dialog in Application.OpenForms)
+                        if(dialog.GetType().Name=="AdapterDialog")
+                        {
+                            timer.Stop();opened=true;try { action(dialog); } catch(Exception ex) { failure=ex;dialog.Close(); }return;
+                        }
+                };
+                timer.Start();FormField<Button>(form,"_adapterButton").PerformClick();timer.Stop();
+            }
+            if(failure!=null)throw failure;if(!opened)throw new Exception("amount configuration dialog not opened");
+        }
         private static void AssertContentTitleRemoved(Control parent)
         {
             foreach(Control child in parent.Controls) { if(child is Label && child.Text=="中转站余额")throw new Exception("large content title remains");AssertContentTitleRemoved(child); }
@@ -226,6 +250,13 @@ namespace RelayBalanceDesktop
                 if(!FormField<Label>(form,"_summaryLabel").Text.Contains("2 个需关注"))throw new Exception("missing account balance not flagged");
                 grid.CurrentCell=grid.Rows[3].Cells[0];Application.DoEvents();
                 if(!FormField<Label>(form,"_details").Text.Contains("当前Key未返回账户余额"))throw new Exception("unlimited key explanation missing");
+                Button getBalance=FormField<Button>(form,"_retryDetectionButton");AssertActionReachable(getBalance);
+                if(getBalance.Text!="获取余额")throw new Exception("unlimited key retrieval label");
+                foreach(bool refreshing in new bool[]{true,false}) {snapshot.refreshing=refreshing;form.ApplySnapshot(snapshot);Application.DoEvents();if(getBalance.Enabled==refreshing)throw new Exception("retrieval refresh guard");}
+                Dictionary<string,bool> pending=FormField<Dictionary<string,bool>>(form,"_pendingVisibility");pending[snapshot.providers[3].id]=true;
+                typeof(BalanceForm).GetMethod("ShowSelection",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(form,null);if(getBalance.Enabled)throw new Exception("retrieval visibility guard");pending.Clear();
+                snapshot.providers[3].adapterConfig=new AdapterConfig{type="newapi-token",amountMode="manual",unit="CNY",divisor=500000,balanceKind="account"};snapshot.providers[3].unit="CNY";snapshot.providers[3].usageUnit="USD";snapshot.providers[3].todayUsage=1.25;
+                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells[2].Value!="未获取账户余额" || !FormField<Label>(form,"_details").Text.Contains("1.25 USD"))throw new Exception("manual amount fabricated balance or changed usage unit");
                 snapshot.providers[3].adapter="newapi-account";snapshot.providers[3].balanceKindLabel="账户余额";snapshot.providers[3].remaining=26.75;snapshot.providers[3].unit="USD";
                 form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells[2].Value!="26.75 USD")throw new Exception("real account balance hidden");
                 snapshot.providers[3].adapter="sub2api";snapshot.providers[3].balanceKindLabel="订阅剩余额度";snapshot.providers[3].remaining=null;
@@ -237,6 +268,44 @@ namespace RelayBalanceDesktop
             }
             Snapshot invalid=DemoSnapshot();invalid.hiddenProviders[0].id=invalid.providers[0].id;if(BackendClient.ValidSnapshot(invalid))throw new Exception("hidden duplicate accepted");
             invalid=DemoSnapshot();invalid.hiddenProviders[0].id="invalid";if(BackendClient.ValidSnapshot(invalid))throw new Exception("hidden invalid id accepted");
+            invalid=DemoSnapshot();invalid.providers[0].adapterConfig=new AdapterConfig{type="auto",amountMode="invalid"};if(BackendClient.ValidSnapshot(invalid))throw new Exception("invalid amount mode accepted");
+            invalid.providers[0].adapterConfig=new AdapterConfig{type="auto",amountMode="manual",unit="USD",divisor=1,balanceKind="account"};if(!BackendClient.ValidSnapshot(invalid))throw new Exception("manual amount config rejected");
+            invalid.providers[0].adapterConfig.unit="";if(BackendClient.ValidSnapshot(invalid))throw new Exception("incomplete manual amount config accepted");
+        }
+        private static void TestAmountConfiguration()
+        {
+            using(BackendClient backend=new BackendClient())
+            using(BalanceForm form=new BalanceForm(backend,true))
+            {
+                form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-30000,-30000);form.ShowInTaskbar=false;form.Show();
+                Snapshot snapshot=DemoSnapshot();snapshot.providers[0].adapterConfig=new AdapterConfig{type="newapi-token",amountMode="manual",unit="CNY",divisor=500000,balanceKind="key"};
+                snapshot.providers[0].unit="CNY";snapshot.providers[0].usageUnit="USD";form.ApplySnapshot(snapshot);Application.DoEvents();
+                DataGridView grid=FormField<DataGridView>(form,"_grid");grid.CurrentCell=grid.Rows[0].Cells[0];Application.DoEvents();
+                if(!((string)grid.Rows[0].Cells[3].Value).Contains("手动指定") || !FormField<Label>(form,"_details").Text.Contains("1.25 USD"))throw new Exception("manual scope or usage unit presentation");
+                CaptureAdapterDialog(form,delegate(Form dialog) {
+                    ComboBox type=DialogField<ComboBox>(dialog,"_type"),mode=DialogField<ComboBox>(dialog,"_amountMode"),kind=DialogField<ComboBox>(dialog,"_kind");
+                    TextBox unit=DialogField<TextBox>(dialog,"_unit"),path=DialogField<TextBox>(dialog,"_path"),field=DialogField<TextBox>(dialog,"_remainingPath");NumericUpDown divisor=DialogField<NumericUpDown>(dialog,"_divisor");
+                    if(mode.SelectedIndex!=1 || !unit.Enabled || unit.Text!="CNY" || divisor.Value!=500000M || kind.SelectedIndex!=1 || path.Enabled)throw new Exception("built-in manual rule not restored");
+                    mode.SelectedIndex=0;if(unit.Enabled)throw new Exception("automatic amount fields enabled");mode.SelectedIndex=1;if(unit.Text!="CNY"||divisor.Value!=500000M)throw new Exception("mode switch cleared amount rule");
+                    for(int i=0;i<6;i++){type.SelectedIndex=i;Application.DoEvents();if(mode.SelectedIndex!=1 || !mode.Enabled || !unit.Enabled || unit.Text!="CNY")throw new Exception("built-in protocol lost manual rule");}
+                    type.SelectedIndex=6;path.Text="/api/balance";field.Text="data.balance";Application.DoEvents();if(mode.Enabled||mode.SelectedIndex!=1||!path.Enabled||!unit.Enabled)throw new Exception("custom amount schema unavailable");
+                    type.SelectedIndex=2;if(mode.SelectedIndex!=1||path.Enabled||unit.Text!="CNY")throw new Exception("return to built-in lost manual mode");
+                    mode.SelectedIndex=0;type.SelectedIndex=6;type.SelectedIndex=2;if(mode.SelectedIndex!=0||unit.Enabled||path.Text!="/api/balance"||field.Text!="data.balance")throw new Exception("automatic mode or custom drafts lost");
+                    mode.SelectedIndex=1;unit.Text="";((Button)dialog.AcceptButton).PerformClick();if(dialog.IsDisposed||String.IsNullOrWhiteSpace(DialogField<Label>(dialog,"_error").Text))throw new Exception("manual amount allowed missing unit");
+                    unit.Text="CNY";divisor.Value=1000M;kind.SelectedIndex=2;AssertActionReachable((Button)dialog.AcceptButton);((Button)dialog.AcceptButton).PerformClick();
+                });
+                string id=snapshot.providers[0].id;Dictionary<string,AdapterConfig> adapters=FormField<Dictionary<string,AdapterConfig>>(form,"_adapters");AdapterConfig saved=adapters[id];
+                if(saved.type!="newapi-token"||saved.amountMode!="manual"||saved.unit!="CNY"||saved.divisor!=1000||saved.balanceKind!="account"||saved.path!=null||saved.remainingPath!=null)throw new Exception("built-in amount config output");
+                form.ApplySnapshot(snapshot);Application.DoEvents();if(adapters[id].divisor!=1000||!FormField<HashSet<string>>(form,"_editedAdapters").Contains(id))throw new Exception("snapshot overwrote unsaved amount rule");
+                CaptureAdapterDialog(form,delegate(Form dialog) {
+                    if(DialogField<ComboBox>(dialog,"_amountMode").SelectedIndex!=1||DialogField<NumericUpDown>(dialog,"_divisor").Value!=1000M)throw new Exception("manual amount edit did not reopen");
+                    DialogField<ComboBox>(dialog,"_type").SelectedIndex=6;DialogField<TextBox>(dialog,"_path").Text="/api/balance";DialogField<TextBox>(dialog,"_remainingPath").Text="data.balance";((Button)dialog.AcceptButton).PerformClick();
+                });
+                saved=adapters[id];if(saved.type!="custom"||saved.amountMode!=null||saved.path!="/api/balance"||saved.remainingPath!="data.balance"||saved.divisor!=1000||saved.balanceKind!="account")throw new Exception("custom legacy amount schema changed");
+                CaptureAdapterDialog(form,delegate(Form dialog) {DialogField<ComboBox>(dialog,"_type").SelectedIndex=0;DialogField<ComboBox>(dialog,"_amountMode").SelectedIndex=0;((Button)dialog.AcceptButton).PerformClick();});
+                saved=adapters[id];if(saved.type!="auto"||saved.amountMode!="auto"||saved.unit!=null||saved.divisor.HasValue)throw new Exception("automatic amount serialized disabled fields");
+                form.Close();
+            }
         }
         private static void PumpUntil(Func<bool> condition,int timeout,string failure)
         {
@@ -365,8 +434,8 @@ namespace RelayBalanceDesktop
                     if(notifications.Checked)throw new Exception("notification reload");
                 }
                 TestProviderActions();
-                TestBalancePresentation();TestVisibilityLifecycle(runtime,fixture);
-                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\",\"wrapped provider names and apps fit after refresh and resize\",\"content title removed\",\"hidden providers validated\",\"remove and restore through actual buttons\",\"visibility preserves unsaved settings\",\"visibility does not modify CC Switch\",\"unlimited key is not an account balance\",\"real account balance and unlimited subscription preserved\"]}",new UTF8Encoding(false));
+                TestBalancePresentation();TestAmountConfiguration();TestVisibilityLifecycle(runtime,fixture);
+                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\",\"wrapped provider names and apps fit after refresh and resize\",\"content title removed\",\"hidden providers validated\",\"remove and restore through actual buttons\",\"visibility preserves unsaved settings\",\"visibility does not modify CC Switch\",\"unlimited key is not an account balance\",\"real account balance and unlimited subscription preserved\",\"missing balance retrieval action and busy guards\",\"built-in manual amount round trip and mode switching\",\"manual amount validation and custom compatibility\",\"usage unit remains independent of manual balance unit\"]}",new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception ex) { File.WriteAllText(report,new JavaScriptSerializer().Serialize(new {passed=false,error=ex.Message}),new UTF8Encoding(false));return 1; }

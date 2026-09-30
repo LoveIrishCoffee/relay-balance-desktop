@@ -588,3 +588,106 @@ test('hiding a pending query prevents both automatic and cached protocol fallbac
     assert.deepEqual(routes, cached ? ['/v1/usage', '/v1/usage'] : ['/v1/usage']); assert.deepEqual(monitor.snapshot().providers, []); assert.equal(monitor.snapshot().hiddenProviders[0].id, id);
   }
 });
+
+test('amount rules validate complete manual mappings and normalize automatic modes', () => {
+  const rule = { amountMode: 'manual', unit: 'CNY', divisor: 100, balanceKind: 'account' };
+  for (const type of ['auto', 'sub2api', 'newapi-token', 'newapi-account', 'openrouter', 'deepseek']) assert.deepEqual(validateAdapter({ type, ...rule }), { type, ...rule });
+  for (const amountMode of [undefined, null, 'auto']) assert.deepEqual(validateAdapter({ type: 'auto', amountMode, unit: 'CNY', divisor: 100, balanceKind: 'account' }), { type: 'auto' });
+  for (const invalid of [{ amountMode: 'invalid' }, { amountMode: 1 }, { ...rule, unit: '' }, { ...rule, unit: '<script>' }, { ...rule, divisor: 0 }, { ...rule, divisor: -1 }, { ...rule, divisor: Infinity }, { ...rule, divisor: '100' }, { ...rule, balanceKind: 'wallet-guess' }]) assert.throws(() => validateAdapter({ type: 'newapi-token', ...invalid }));
+  assert.deepEqual(validateSettings({ adapters: { [ID_A]: { type: 'auto', ...rule } } }).adapters[ID_A], { type: 'auto', ...rule });
+});
+
+test('manual New API amounts divide raw quota once while leaving usage in its original currency', async () => {
+  const rule = { type: 'newapi-token', amountMode: 'manual', unit: 'CNY', divisor: 100, balanceKind: 'account' };
+  const result = await queryProvider(credential(), rule, async url => url.pathname === '/api/status'
+    ? response({ data: { quota_per_unit: 100000, quota_display_type: 'USD' } })
+    : response({ data: { object: 'token_usage', total_available: 250000, total_used: 50000 } }));
+  assert.equal(result.remaining, 2500); assert.equal(result.unit, 'CNY'); assert.equal(result.totalUsage, 0.5); assert.equal(result.usageUnit, 'USD');
+  assert.match(result.balanceKindLabel, /手动指定/); assert.match(result.balanceKindLabel, /账户/);
+});
+
+test('manual balance scope is labelled as user specified and never relabels usage amounts', async () => {
+  const result = await queryProvider(credential(), { type: 'sub2api', amountMode: 'manual', unit: 'EUR', divisor: 100, balanceKind: 'account' }, async () => response({ ...usage(1200), mode: 'quota_limited', planName: 'Key quota' }));
+  assert.equal(result.remaining, 12); assert.equal(result.unit, 'EUR'); assert.match(result.balanceKindLabel, /账户/); assert.match(result.balanceKindLabel, /手动指定/);
+  assert.equal(result.todayUsage, 0.2); assert.equal(result.totalUsage, 3); assert.equal(result.usageUnit, 'USD');
+});
+
+test('manual account quota and existing custom mappings each apply their divisor exactly once', async () => {
+  const metadata = { usage_script: { enabled: true, baseUrl: 'https://relay-a.example', accessToken: 'account-fixture-token', userId: 42 } };
+  const c = selectCredentials([row('meta', undefined, undefined, { meta: JSON.stringify(metadata) })])[0];
+  const account = await queryProvider(c, { type: 'newapi-account', amountMode: 'manual', unit: 'CNY', divisor: 100, balanceKind: 'account' }, async url => url.pathname === '/api/status'
+    ? response({ data: { quota_per_unit: 100000, quota_display_type: 'USD' } })
+    : response({ data: { quota: 125000, used_quota: 50000 } }));
+  assert.equal(account.remaining, 1250); assert.equal(account.totalUsage, 0.5); assert.equal(account.usageUnit, 'USD');
+  const custom = await queryProvider(credential(), { type: 'custom', amountMode: 'manual', path: '/balance', remainingPath: 'data.balance', unit: 'CNY', divisor: 100, balanceKind: 'account' }, async () => response({ data: { balance: 1250 } }));
+  assert.equal(custom.remaining, 12.5); assert.equal(custom.unit, 'CNY');
+});
+
+test('manual rules cannot turn unlimited, missing or unauthorized responses into account money', async () => {
+  const adapter = { type: 'newapi-token', amountMode: 'manual', unit: 'CNY', divisor: 100, balanceKind: 'account' };
+  const unlimited = await queryProvider(credential(), adapter, async url => url.pathname === '/api/status'
+    ? response({ data: { quota_per_unit: 100000, quota_display_type: 'USD' } })
+    : response({ data: { object: 'token_usage', total_available: 0, total_used: 100000, unlimited_quota: true } }));
+  assert.equal(unlimited.remaining, null); assert.equal(unlimited.unlimited, true);
+  await assert.rejects(queryProvider(credential(), adapter, async () => response({ data: {} })), QueryError);
+  await assert.rejects(queryProvider(credential(), adapter, async () => response({ error: 'no account permission' }, { status: 401 })), { code: 'invalid_key' });
+});
+
+test('automatic detection and cached adapters keep rules consistent, then clear them when automatic amounts return', async () => {
+  const id = credential().id, rule = { amountMode: 'manual', unit: 'CNY', divisor: 100, balanceKind: 'account' }; const seen = [];
+  const monitor = new Monitor({ ...emptySettings(), adapters: { [id]: { type: 'auto', ...rule } } }, { discoverFn: () => [credential()], queryFn: (c, adapter, _fetch, isActive) => { seen.push(structuredClone(adapter)); return queryProvider(c, adapter, async () => response(usage(1200)), isActive); } });
+  await monitor.refresh(); assert.equal(monitor.snapshot().providers[0].remaining, 12); await monitor.refresh({ force: true });
+  const second = monitor.snapshot().providers[0]; assert.equal(second.remaining, 12); assert.equal(second.unit, 'CNY'); assert.equal(second.totalUsage, 3); assert.equal(second.usageUnit, 'USD');
+  assert.deepEqual(seen.slice(0, 2), [{ type: 'auto', ...rule }, { type: 'sub2api', ...rule }]);
+  monitor.settings.adapters[id] = { type: 'auto', ...rule, unit: 'EUR', divisor: 200, balanceKind: 'key' }; await monitor.checkForChanges();
+  const changed = monitor.snapshot().providers[0]; assert.equal(changed.remaining, 6); assert.equal(changed.unit, 'EUR'); assert.match(changed.balanceKindLabel, /手动指定/); assert.match(changed.balanceKindLabel, /Key/);
+  monitor.settings.adapters[id] = { type: 'auto' }; await monitor.checkForChanges(); const restored = monitor.snapshot().providers[0];
+  assert.equal(restored.remaining, 1200); assert.equal(restored.unit, 'USD'); assert.equal(restored.balanceKindLabel.includes('手动指定'), false); assert.deepEqual(restored.adapterConfig, { type: 'auto' }); assert.deepEqual(seen.at(-1), { type: 'auto' });
+});
+
+test('get-balance retry targets only the selected unlimited key and preserves its manual rule', async () => {
+  const selected = credentials()[0], rule = { amountMode: 'manual', unit: 'CNY', divisor: 100, balanceKind: 'account' }; let hasBalance = false; const calls = [];
+  const monitor = new Monitor({ ...emptySettings(), adapters: { [selected.id]: { type: 'auto', ...rule } } }, { discoverFn: credentials, queryFn: (c, adapter, _fetch, isActive) => {
+    calls.push({ id: c.id, adapter: structuredClone(adapter) });
+    return queryProvider(c, adapter, async url => {
+      if (url.pathname === '/v1/usage') return response({}, { status: 404 });
+      if (url.pathname === '/api/status') return response({ data: { quota_per_unit: 100000, quota_display_type: 'USD' } });
+      return response({ data: { object: 'token_usage', total_available: hasBalance && c.id === selected.id ? 700 : 0, total_used: 0, unlimited_quota: !(hasBalance && c.id === selected.id) } });
+    }, isActive);
+  } });
+  await monitor.refresh(); assert.ok(monitor.snapshot().providers.every(p => p.status === 'ok' && p.unlimited && p.remaining === null)); const saved = JSON.stringify(monitor.settings);
+  hasBalance = true; await monitor.retryDetection(selected.id); const state = monitor.snapshot();
+  assert.equal(calls.length, 3); assert.deepEqual(calls[2], { id: selected.id, adapter: { type: 'auto', ...rule } });
+  assert.equal(state.providers[0].remaining, 7); assert.equal(state.providers[0].unit, 'CNY'); assert.equal(state.providers[1].remaining, null); assert.equal(state.providers[1].unlimited, true); assert.equal(JSON.stringify(monitor.settings), saved);
+  const otherId = state.providers[1].id; monitor.settings = monitor.settingsWithVisibility(otherId, true); await monitor.checkForChanges(); await assert.rejects(monitor.retryDetection(otherId)); assert.equal(calls.length, 3);
+});
+
+test('get-balance retry for an unlimited key still observes upstream rate limits', async t => {
+  let now = Date.now(), calls = 0; t.mock.method(Date, 'now', () => now);
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => [credential()], queryFn: async () => {
+    calls++; if (calls === 1) return { ...parseNewApi({ data: { unlimited_quota: true, total_available: 0 } }, {}), adapter: 'newapi-token' };
+    if (calls === 2) throw new QueryError('rate_limit', '请稍后再获取余额', 120); return { ...parsed(9), adapter: 'sub2api' };
+  } });
+  await monitor.refresh(); const id = monitor.snapshot().providers[0].id; await monitor.retryDetection(id); assert.equal(calls, 2);
+  await assert.rejects(monitor.retryDetection(id), { code: 'rate_limit' }); await monitor.refresh({ force: true }); assert.equal(calls, 2);
+  now += 120000; await monitor.retryDetection(id); assert.equal(calls, 3); assert.equal(monitor.snapshot().providers[0].remaining, 9);
+});
+
+test('usage units do not retain an older currency when later metadata is unavailable', async () => {
+  const selected = credential(); let missingMetadata = false;
+  const mapping = { type: 'newapi-token', amountMode: 'manual', unit: 'CNY', divisor: 100, balanceKind: 'key' };
+  const monitor = new Monitor({ ...emptySettings(), adapters: { [selected.id]: mapping } }, {
+    discoverFn: () => [selected],
+    queryFn: (c, adapter, _fetch, isActive) => queryProvider(c, adapter, async url => {
+      if (url.pathname === '/api/status') return response({ data: missingMetadata ? {} : { quota_per_unit: 100000, quota_display_type: 'USD' } });
+      return response({ data: { total_available: missingMetadata ? 0 : 250000, total_used: 50000, unlimited_quota: missingMetadata } });
+    }, isActive),
+  });
+  await monitor.refresh();
+  assert.equal(monitor.snapshot().providers[0].usageUnit, 'USD');
+  assert.equal(monitor.snapshot().providers[0].totalUsage, 0.5);
+  missingMetadata = true; await monitor.refresh({ force: true });
+  const next = monitor.snapshot().providers[0];
+  assert.equal(next.remaining, null); assert.equal(next.unlimited, true);
+  assert.equal(next.totalUsage, 50000); assert.equal(next.usageUnit, 'quota');
+});

@@ -132,3 +132,16 @@ globalThis.fetch = async (url, options) => {
     worker.send({ method: 'stop' }); const [code] = await worker.exit; assert.equal(code, 0);
   }
 });
+
+test('manual amount rules persist across IPC updates and restart, then clear when returning to automatic amounts', { timeout: 15000 }, async t => {
+  const f = await fixture(t); await f.next();
+  const db = new DatabaseSync(f.database); db.prepare('INSERT INTO providers VALUES(?,?,?,?,?,?)').run('amount-row', '金额配置测试', 'codex', JSON.stringify({ base_url: 'https://fixture.example', api_key: '' }), 1, '{}'); db.close();
+  f.send({ method: 'refresh' }); const added = await f.next(m => m.type === 'snapshot' && m.data.providers.length === 1); const id = added.data.providers[0].id;
+  const adapter = { type: 'auto', amountMode: 'manual', unit: 'CNY', divisor: 500000, balanceKind: 'account' };
+  f.send({ method: 'settings', settings: { intervalSeconds: 600, thresholds: { [id]: 3 }, adapters: { [id]: adapter } } }); const saved = await f.next(m => m.type === 'settings_saved'); assert.deepEqual(saved.data.providers[0].adapterConfig, adapter);
+  f.send({ method: 'settings', settings: { intervalSeconds: 120, thresholds: { [id]: 4 }, adapters: {} } }); await f.next(m => m.type === 'settings_saved');
+  let persisted = JSON.parse(await readFile(path.join(f.directory, 'settings.json'), 'utf8')); assert.deepEqual(persisted.adapters[id], adapter);
+  f.send({ method: 'stop' }); await f.exit; const restarted = f.start(); const initial = await restarted.next(m => m.type === 'snapshot'); assert.deepEqual(initial.data.providers[0].adapterConfig, adapter); assert.equal(initial.data.providers[0].threshold, 4);
+  restarted.send({ method: 'settings', settings: { intervalSeconds: 120, thresholds: {}, adapters: { [id]: { type: 'auto', amountMode: 'auto', unit: 'CNY', divisor: 500000, balanceKind: 'account' } } } }); const automatic = await restarted.next(m => m.type === 'settings_saved'); assert.deepEqual(automatic.data.providers[0].adapterConfig, { type: 'auto' });
+  persisted = JSON.parse(await readFile(path.join(f.directory, 'settings.json'), 'utf8')); assert.deepEqual(persisted.adapters[id], { type: 'auto' }); assert.equal(persisted.thresholds[id], 4);
+});

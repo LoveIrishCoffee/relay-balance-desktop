@@ -26,16 +26,21 @@ export async function saveJson(file, value) {
 }
 export function validateAdapter(input) {
   if (!object(input) || !Object.hasOwn(labels, input.type)) throw new Error('不支持的查询方式');
-  if (Object.keys(input).some(k => !['type', 'path', 'remainingPath', 'unit', 'divisor', 'balanceKind'].includes(k))) throw new Error('查询设置格式错误');
-  if (input.type !== 'custom') return { type: input.type };
-  if (!routeOK(input.path)) throw new Error('接口须为同站点路径，不能包含查询参数或跳转');
-  if (typeof input.remainingPath !== 'string' || input.remainingPath.length > 200 || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))*$/.test(input.remainingPath) || input.remainingPath.split('.').some(p => ['__proto__', 'constructor', 'prototype'].includes(p))) throw new Error('余额字段路径无效');
+  if (Object.keys(input).some(k => !['type', 'path', 'remainingPath', 'unit', 'divisor', 'balanceKind', 'amountMode'].includes(k))) throw new Error('查询设置格式错误');
+  if (input.amountMode != null && !['auto', 'manual'].includes(input.amountMode)) throw new Error('金额设置方式无效');
+  if (input.type !== 'custom' && input.amountMode !== 'manual') return { type: input.type };
+  if (input.type === 'custom') {
+    if (!routeOK(input.path)) throw new Error('接口须为同站点路径，不能包含查询参数或跳转');
+    if (typeof input.remainingPath !== 'string' || input.remainingPath.length > 200 || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))*$/.test(input.remainingPath) || input.remainingPath.split('.').some(p => ['__proto__', 'constructor', 'prototype'].includes(p))) throw new Error('余额字段路径无效');
+  }
   if (typeof input.unit !== 'string' || !unitPattern.test(input.unit)) throw new Error('请明确填写余额单位');
   const divisor = input.divisor ?? 1;
   if (typeof divisor !== 'number' || !Number.isFinite(divisor) || divisor <= 0 || divisor > 1e15) throw new Error('换算除数须大于零');
   const balanceKind = input.balanceKind || 'quota';
   if (!['account', 'key', 'quota'].includes(balanceKind)) throw new Error('余额类型无效');
-  return { type: 'custom', path: input.path, remainingPath: input.remainingPath, unit: input.unit, divisor, balanceKind };
+  return input.type === 'custom'
+    ? { type: 'custom', path: input.path, remainingPath: input.remainingPath, unit: input.unit, divisor, balanceKind }
+    : { type: input.type, amountMode: 'manual', unit: input.unit, divisor, balanceKind };
 }
 export function validateSettings(input) {
   if (!object(input) || Object.keys(input).some(k => !['intervalSeconds', 'thresholds', 'adapters', 'hiddenProviders'].includes(k))) throw new Error('设置格式错误');
@@ -256,12 +261,22 @@ function routes(credential) {
   const prefix = base.replace(/\/(?:v1|v1beta)$/, '');
   return { usage: prefix + '/v1/usage', token: prefix + '/api/usage/token/', status: prefix + '/api/status', account: prefix + '/api/user/self' };
 }
+function applyAmountSettings(result, adapter, rawRemaining) {
+  if (adapter.type === 'custom' || adapter.amountMode !== 'manual') return result;
+  // Missing money and unlimited Key caps are not numeric balances, regardless of user labels.
+  if (result.unlimited || result.remaining === null) return { ...result, message: result.message + '；已保存手动金额规则，但接口未返回可换算的余额' };
+  const remaining = rawRemaining / adapter.divisor;
+  if (rawRemaining === null || !Number.isFinite(remaining)) schema();
+  return { ...result, remaining, unit: unitOf(adapter.unit), usageUnit: result.unit,
+    balanceKindLabel: { account: '账户余额（手动指定）', key: 'API Key 剩余额度（手动指定）', quota: '剩余额度（手动指定）' }[adapter.balanceKind],
+    message: '余额按手动规则换算：接口余额数值 ÷ ' + adapter.divisor + '；单位和余额范围由用户指定，用量保留接口单位。请按站点文档核对，修改范围不会增加账户查询权限' };
+}
 async function queryWith(credential, adapter, fetchImpl, isActive) {
   const route = routes(credential), get = (url, auth = 'key') => {
     if (!isActive()) throw new QueryError('cancelled', '配置已移出或更改，停止后续查询');
     return requestJson(credential, url, { fetchImpl, auth });
   };
-  let result;
+  let result, rawRemaining;
   if (adapter.type === 'sub2api') result = parseUsage(await get(route.usage));
   else if (adapter.type === 'newapi-token' || adapter.type === 'newapi-account') {
     const account = adapter.type === 'newapi-account';
@@ -269,11 +284,14 @@ async function queryWith(credential, adapter, fetchImpl, isActive) {
     // Conversion discovery is public and optional. Unknown ratios must stay raw.
     let status = null; try { status = await get(route.status, 'none'); } catch (error) { if (error.code === 'rate_limit' || error.code === 'cancelled') throw error; }
     result = parseNewApi(raw, status, { account });
+    // Manual divisors apply to the original quota, never to an already converted currency value.
+    rawRemaining = result.unlimited ? null : finite(account ? raw.data.quota : raw.data.total_available);
   } else if (adapter.type === 'openrouter') result = parseOpenRouter(await get('/api/v1/credits'));
   else if (adapter.type === 'deepseek') result = parseDeepSeek(await get('/user/balance'));
   else if (adapter.type === 'custom') result = parseCustom(await get(adapter.path), adapter);
   else throw new QueryError('unsupported', '未选择可识别的查询方式');
-  return { ...result, adapter: adapter.type, adapterLabel: labels[adapter.type] };
+  result = applyAmountSettings(result, adapter, rawRemaining === undefined ? result.remaining : rawRemaining);
+  return { ...result, usageUnit: result.usageUnit || result.unit, adapter: adapter.type, adapterLabel: labels[adapter.type] };
 }
 export async function queryProvider(credential, input = { type: 'auto' }, fetchImpl = fetch, isActive = () => true) {
   const adapter = validateAdapter(input);
@@ -282,7 +300,7 @@ export async function queryProvider(credential, input = { type: 'auto' }, fetchI
   const candidates = hostname === 'openrouter.ai' ? ['openrouter'] : hostname === 'api.deepseek.com' ? ['deepseek'] : [...(credential.metaUsage ? ['newapi-account'] : []), 'sub2api', 'newapi-token'];
   let authError;
   for (const type of candidates) {
-    try { return await queryWith(credential, { type }, fetchImpl, isActive); }
+    try { return await queryWith(credential, { ...adapter, type }, fetchImpl, isActive); }
     catch (error) {
       if (error.code === 'invalid_key' || error.code === 'inactive') authError = error;
       else if (!['endpoint_missing', 'schema_error', 'not_json', 'account_auth'].includes(error.code)) throw error;
@@ -349,7 +367,8 @@ export class Monitor {
     if (!idPattern.test(id)) throw new QueryError('invalid_id', '配置标识无效');
     if (!this.reconcile()) return this.snapshot();
     const entry = this.entries.get(id);
-    if (!entry || entry.hidden || !['unsupported','error','stale'].includes(entry.state.status) || entry.credential.blockedReason) throw new QueryError('invalid_detection', '仅适配或查询失败的配置可以重试');
+    const missingBalance = entry?.state.status === 'ok' && entry.state.adapter === 'newapi-token' && entry.state.unlimited && entry.state.remaining === null;
+    if (!entry || entry.hidden || !(['unsupported','error','stale'].includes(entry.state.status) || missingBalance) || entry.credential.blockedReason) throw new QueryError('invalid_detection', '仅适配失败、查询失败或余额未获取的配置可以重试');
     if (entry.retryAt > Date.now()) throw new QueryError('rate_limit', '站点要求等待，限流结束后才能重试');
     if (Date.now() - (entry.lastManualDetection || 0) < 10000) throw new QueryError('retry_soon', '请等待 10 秒后再继续识别');
     entry.lastManualDetection = Date.now();
@@ -383,7 +402,7 @@ export class Monitor {
         origins.add(entry.credential.origin); entry.lastAttempt = Date.now(); entry.needsQuery = false;
         try {
           let result;
-          try { result = await this.queryFn(entry.credential, entry.autoAdapter || entry.adapter, undefined, isActive); }
+          try { result = await this.queryFn(entry.credential, entry.autoAdapter ? { ...entry.adapter, type: entry.autoAdapter.type } : entry.adapter, undefined, isActive); }
           catch (error) {
             if (isActive() && entry.autoAdapter && ['endpoint_missing', 'schema_error', 'not_json', 'unsupported'].includes(error.code)) { entry.autoAdapter = null; result = await this.queryFn(entry.credential, entry.adapter, undefined, isActive); }
             else throw error;

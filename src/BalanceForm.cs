@@ -42,6 +42,8 @@ namespace RelayBalanceDesktop
         private ContextMenuStrip _trayMenu;
         private Snapshot _latestSnapshot;
         private string _selectedId;
+        private string _detectingProviderId;
+        private bool _retrievingBalance;
         private bool _exitRequested, _stopped, _updatingSettings, _updatingGrid, _intervalDirty, _waitingForSettings, _trayHintShown, _refreshing;
 
         public BalanceForm(BackendClient client, bool preview)
@@ -256,7 +258,7 @@ namespace RelayBalanceDesktop
             }
             catch { OnErrorReceived("设置保存失败，请重试。"); }
         }
-        private void SetSettingsEnabled(bool enabled) { _threshold.Enabled = enabled && _selectedId != null; _adapterButton.Enabled = enabled && _selectedId != null; _interval.Enabled = enabled; _saveButton.Enabled = enabled; _retryDetectionButton.Enabled = enabled && _selectedId != null && !_editedAdapters.Contains(_selectedId) && !_refreshing; }
+        private void SetSettingsEnabled(bool enabled) { _threshold.Enabled = enabled && _selectedId != null; _adapterButton.Enabled = enabled && _selectedId != null; _interval.Enabled = enabled; _saveButton.Enabled = enabled; _retryDetectionButton.Enabled = enabled && _selectedId != null && !_editedAdapters.Contains(_selectedId) && !_pendingVisibility.ContainsKey(_selectedId) && !_refreshing; }
         private void OnSettingsSaved()
         {
             RunOnUi(delegate { _waitingForSettings = false; _editedThresholds.Clear(); _editedAdapters.Clear(); _intervalDirty = false;
@@ -269,6 +271,7 @@ namespace RelayBalanceDesktop
         {
             if (_stopped) return;
             _latestSnapshot = data; _refreshing = data.refreshing;
+            if (!_refreshing) { _detectingProviderId = null; _retrievingBalance = false; }
             _hiddenProviders = data.hiddenProviders == null ? new List<HiddenProviderSnapshot>() : new List<HiddenProviderSnapshot>(data.hiddenProviders);
             _hiddenButton.Text = "已移出 (" + _hiddenProviders.Count.ToString(CultureInfo.InvariantCulture) + ")";
             _refreshButton.Enabled = !data.refreshing; _refreshButton.Text = data.refreshing ? "正在刷新…" : "立即刷新";
@@ -283,7 +286,7 @@ namespace RelayBalanceDesktop
                     foreach (ProviderSnapshot p in data.providers)
                     {
                         if (p == null || String.IsNullOrEmpty(p.id)) continue; _providers[p.id] = p;
-                        int index = _grid.Rows.Add((p.current ? "● " : "") + p.name + "\r\n" + AppLabel(p.app), p.origin ?? "地址未配置", BalanceText(p), String.IsNullOrWhiteSpace(p.balanceKindLabel) ? "待确认" : p.balanceKindLabel, AdapterDisplay(p), StatusText(p), LocalDate(p.status == "stale" ? p.lastSuccessAt : p.updatedAt, false));
+                        int index = _grid.Rows.Add((p.current ? "● " : "") + p.name + "\r\n" + AppLabel(p.app), p.origin ?? "地址未配置", BalanceText(p), BalanceKindText(p), AdapterDisplay(p), StatusText(p), LocalDate(p.status == "stale" ? p.lastSuccessAt : p.updatedAt, false));
                         DataGridViewRow row = _grid.Rows[index]; row.Tag = p.id;
                         row.Cells[0].ToolTipText = p.name + " / " + AppLabel(p.app) + (p.current ? " · 当前使用" : ""); row.Cells[1].ToolTipText = p.origin ?? "";
                         row.Cells[2].Style.ForeColor = p.status == "stale" ? Muted : (p.status == "ok" && p.lowBalance ? Warning : Ink);
@@ -383,12 +386,16 @@ namespace RelayBalanceDesktop
             AdapterConfig config; _adapters.TryGetValue(p.id, out config);
             _selectedAdapter.Text = "查询适配：" + AdapterName(config == null ? "auto" : config.type) + (_editedAdapters.Contains(p.id) ? "（待保存）" : ""); _tips.SetToolTip(_selectedAdapter, _selectedAdapter.Text);
             bool unresolved = p.status == "unsupported";
-            bool retryable = unresolved || p.status == "error" || p.status == "stale";
-            _retryDetectionButton.Visible = retryable;
-            _retryDetectionButton.Enabled = retryable && !_waitingForSettings && !_refreshing && !_editedAdapters.Contains(p.id);
-            _tips.SetToolTip(_retryDetectionButton, _editedAdapters.Contains(p.id) ? "查询适配已修改，请先保存设置，再重新适配。" : "重新检测所选站点；已有手动配置会保留，并按该配置重试。不会执行脚本或登录网站。");
+            bool missingBalance = MissingAccountBalance(p);
+            bool retryable = unresolved || p.status == "error" || p.status == "stale" || (p.status == "ok" && missingBalance);
+            bool requesting = _refreshing && _detectingProviderId == p.id;
+            _retryDetectionButton.Visible = retryable || requesting;
+            _retryDetectionButton.Text = requesting ? (_retrievingBalance ? "正在获取…" : "正在适配…") : (missingBalance ? "获取余额" : "适配");
+            _retryDetectionButton.Enabled = retryable && !_waitingForSettings && !_refreshing && !_editedAdapters.Contains(p.id) && !_pendingVisibility.ContainsKey(p.id);
+            _tips.SetToolTip(_retryDetectionButton, _editedAdapters.Contains(p.id) ? "查询适配已修改，请先保存设置，再重试。" : (missingBalance ? "单独重试此配置的余额查询；已有手动配置会保留。能否获取账户余额取决于查询凭据的权限。" : "重新检测所选站点；已有手动配置会保留，并按该配置重试。不会执行脚本或登录网站。"));
             _adapterButton.Text = "手动配置…";
-            _details.Text = StatusText(p) + (String.IsNullOrWhiteSpace(p.message) ? "" : " · " + p.message) + "\r\n今日实际用量：" + OptionalAmount(p.todayUsage, p.unit) + "    累计实际用量：" + OptionalAmount(p.totalUsage, p.unit)
+            string usageUnit = String.IsNullOrWhiteSpace(p.usageUnit) ? p.unit : p.usageUnit;
+            _details.Text = StatusText(p) + (String.IsNullOrWhiteSpace(p.message) ? "" : " · " + p.message) + "\r\n今日实际用量：" + OptionalAmount(p.todayUsage, usageUnit) + "    累计实际用量：" + OptionalAmount(p.totalUsage, usageUnit)
                 + "\r\n最近查询：" + LocalDate(p.updatedAt, true) + "    最近成功：" + LocalDate(p.lastSuccessAt, true);
             if (p.status == "ok" && !p.unlimited && !IsAlertCurrency(p.unit)) _details.Text += "\r\n当前单位暂不触发金额提醒；支持 USD、CNY、EUR、GBP、JPY、HKD。";
             if (unresolved) _details.Text = "适配失败，可点击“适配”重试。"
@@ -396,20 +403,21 @@ namespace RelayBalanceDesktop
                 + "\r\n已暂停定时适配；配置更改后会自动重新检测。"
                 + "\r\n" + (_editedAdapters.Contains(p.id) ? "适配方式已修改，请先保存设置。" : "最近查询：" + LocalDate(p.updatedAt, true));
             else if(retryable) _details.Text = "可点击“适配”重试所选站点，或使用“手动配置…”。已有手动配置会保留。\r\n" + _details.Text;
-            if (MissingAccountBalance(p))
+            if (missingBalance)
                 _details.Text = "API Key未设限额，不代表账户资金无限；当前Key未返回账户余额。"
-                    + "\r\n读取账户余额需要有效的账户查询凭据；普通 API Key 可能无此权限。"
-                    + "\r\n今日实际用量：" + OptionalAmount(p.todayUsage, p.unit) + "    累计实际用量：" + OptionalAmount(p.totalUsage, p.unit)
+                    + "\r\n可点击“获取余额”重试；读取账户余额需要有效查询凭据，普通 API Key 可能无此权限。"
+                    + "\r\n今日实际用量：" + OptionalAmount(p.todayUsage, usageUnit) + "    累计实际用量：" + OptionalAmount(p.totalUsage, usageUnit)
                     + "\r\n最近查询：" + LocalDate(p.updatedAt, true);
             _tips.SetToolTip(_details, _details.Text);
         }
         private void RetryDetection()
         {
-            if (_preview || _waitingForSettings || _refreshing || _selectedId == null || _editedAdapters.Contains(_selectedId)) return;
-            ProviderSnapshot p; if (!_providers.TryGetValue(_selectedId, out p) || (p.status != "unsupported" && p.status != "error" && p.status != "stale")) return;
-            _retryDetectionButton.Enabled = false; _refreshing = true; _refreshButton.Enabled = false; _refreshButton.Text = "正在适配…";
-            SetMessage("正在重新检测所选站点，已有手动配置会保留…", Muted);
-            try { _client.RetryDetection(_selectedId); } catch { OnErrorReceived("适配未完成，请稍后重试。"); }
+            if (_preview || _waitingForSettings || _refreshing || _selectedId == null || _editedAdapters.Contains(_selectedId) || _pendingVisibility.ContainsKey(_selectedId)) return;
+            ProviderSnapshot p; if (!_providers.TryGetValue(_selectedId, out p) || (p.status != "unsupported" && p.status != "error" && p.status != "stale" && !(p.status == "ok" && MissingAccountBalance(p)))) return;
+            _detectingProviderId = p.id; _retrievingBalance = MissingAccountBalance(p); _refreshing = true; _refreshButton.Enabled = false;
+            _refreshButton.Text = _retrievingBalance ? "正在获取…" : "正在适配…"; ShowSelection();
+            SetMessage(_retrievingBalance ? "正在单独重试此配置的余额查询，已有手动配置会保留…" : "正在重新检测所选站点，已有手动配置会保留…", Muted);
+            try { _client.RetryDetection(_selectedId); } catch { OnErrorReceived("查询未完成，请稍后重试。"); }
         }
         private void ConfigureAdapter()
         {
@@ -426,7 +434,7 @@ namespace RelayBalanceDesktop
         private static AdapterConfig CopyAdapter(AdapterConfig source)
         {
             if (source == null) return new AdapterConfig { type = "auto" };
-            return new AdapterConfig { type = String.IsNullOrEmpty(source.type) ? "auto" : source.type, path = source.path, remainingPath = source.remainingPath, unit = source.unit, balanceKind = source.balanceKind, divisor = source.divisor };
+            return new AdapterConfig { type = String.IsNullOrEmpty(source.type) ? "auto" : source.type, path = source.path, remainingPath = source.remainingPath, amountMode = source.amountMode, unit = source.unit, balanceKind = source.balanceKind, divisor = source.divisor };
         }
         private void HandleLowBalance(ProviderSnapshot provider)
         {
@@ -459,7 +467,7 @@ namespace RelayBalanceDesktop
         }
         private void OnErrorReceived(string message)
         {
-            RunOnUi(delegate { _refreshing = false; _refreshButton.Enabled = true; _refreshButton.Text = "立即刷新";
+            RunOnUi(delegate { _refreshing = false; _detectingProviderId = null; _retrievingBalance = false; _refreshButton.Enabled = true; _refreshButton.Text = "立即刷新";
                 if (_waitingForSettings) { _waitingForSettings = false; SetSettingsEnabled(true); _saveButton.Text = "保存设置"; }
                 bool visibilityFailed = _pendingVisibility.Count > 0; _pendingVisibility.Clear();
                 if (_hiddenDialog != null && !_hiddenDialog.IsDisposed) { _hiddenDialog.UpdateProviders(_hiddenProviders, _pendingVisibility); if (visibilityFailed) _hiddenDialog.ShowError("恢复未完成，请重新尝试。"); }
@@ -487,6 +495,12 @@ namespace RelayBalanceDesktop
         private static bool HasReportedAccountBalance(ProviderSnapshot p) { return p.remaining.HasValue && ((!String.IsNullOrEmpty(p.balanceKindLabel) && p.balanceKindLabel.Contains("账户")) || p.adapter == "newapi-account" || p.adapter == "openrouter" || p.adapter == "deepseek" || (p.adapterConfig != null && p.adapterConfig.type == "custom" && p.adapterConfig.balanceKind == "account")); }
         private static bool MissingAccountBalance(ProviderSnapshot p) { return p.unlimited && p.adapter == "newapi-token" && !HasReportedAccountBalance(p); }
         private static string BalanceText(ProviderSnapshot p) { return MissingAccountBalance(p) ? "未获取账户余额" : (p.remaining.HasValue ? Amount(p.remaining.Value, p.unit) : (p.unlimited ? "不限额" : "—")); }
+        private static string BalanceKindText(ProviderSnapshot p)
+        {
+            string label = String.IsNullOrWhiteSpace(p.balanceKindLabel) ? "待确认" : p.balanceKindLabel;
+            if (p.remaining.HasValue && !p.unlimited && p.adapterConfig != null && p.adapterConfig.amountMode == "manual" && !label.Contains("手动指定")) label += "（手动指定）";
+            return label;
+        }
         private static string AppLabel(string value)
         {
             switch ((value ?? "").ToLowerInvariant()) { case "codex": return "Codex"; case "claude": return "Claude"; case "gemini": return "Gemini"; default: return String.IsNullOrEmpty(value) ? "应用未标注" : value; }
@@ -595,11 +609,12 @@ namespace RelayBalanceDesktop
         }
         private sealed class AdapterDialog : Form
         {
-            private readonly ComboBox _type, _kind;
+            private readonly ComboBox _type, _kind, _amountMode;
             private readonly TextBox _path, _remainingPath, _unit;
             private readonly NumericUpDown _divisor;
-            private readonly Panel _custom;
+            private readonly Panel _custom, _amount;
             private readonly Label _error;
+            private bool _nonCustomManual, _updatingMode;
             public AdapterConfig Config { get; private set; }
             public AdapterDialog(string name, string origin, AdapterConfig config)
             {
@@ -609,31 +624,37 @@ namespace RelayBalanceDesktop
                 Font = new Font("Microsoft YaHei UI", 9F); BackColor = Color.White; ForeColor = Ink; AutoScaleMode = AutoScaleMode.None; ClientSize = new Size(628, 650);
                 Controls.Add(LabelAt("设置此配置的余额查询方式", 24, 17, 580, 32, 15F, FontStyle.Bold, Ink));
                 Controls.Add(LabelAt(origin ?? "地址未配置", 25, 54, 575, 25, 9F, FontStyle.Regular, Muted));
-                Label note = LabelAt("API 地址和 API Key 自动读取 CC Switch，无需再次填写。\r\n请选择已知协议，或根据站点接口文档填写以下自定义字段。", 25, 92, 575, 48, 9F, FontStyle.Regular, Muted); note.AutoEllipsis = false; Controls.Add(note);
-                Controls.Add(LabelAt("1  查询方式", 25, 150, 135, 27, 9F, FontStyle.Regular, Ink));
-                _type = new ComboBox(); _type.Location = new Point(163, 150); _type.Size = new Size(432, 30); _type.DropDownStyle = ComboBoxStyle.DropDownList;
+                Label note = LabelAt("API 地址和 API Key 自动读取 CC Switch，无需再次填写。\r\n只有“自定义 JSON”需要填写路径和字段；金额规则可单独设置。", 25, 92, 575, 48, 9F, FontStyle.Regular, Muted); note.AutoEllipsis = false; Controls.Add(note);
+                Controls.Add(LabelAt("查询方式", 25, 148, 135, 27, 9F, FontStyle.Regular, Ink));
+                _type = new ComboBox(); _type.Location = new Point(163, 148); _type.Size = new Size(432, 30); _type.DropDownStyle = ComboBoxStyle.DropDownList;
                 foreach (string type in new string[] { "auto", "sub2api", "newapi-token", "newapi-account", "openrouter", "deepseek", "custom" }) _type.Items.Add(new AdapterItem(type));
                 _type.SelectedIndex = 0; for (int i = 0; i < _type.Items.Count; i++) if (((AdapterItem)_type.Items[i]).Type == config.type) _type.SelectedIndex = i; Controls.Add(_type);
-                _custom = new Panel(); _custom.Location = new Point(25, 196); _custom.Size = new Size(570, 250); Controls.Add(_custom);
-                _custom.Controls.Add(LabelAt("2  GET 接口路径", 0, 0, 134, 27, 9F, FontStyle.Regular, Ink));
+                _custom = new Panel(); _custom.Location = new Point(25, 190); _custom.Size = new Size(570, 81); Controls.Add(_custom);
+                _custom.Controls.Add(LabelAt("GET 接口路径", 0, 0, 134, 27, 9F, FontStyle.Regular, Ink));
                 _path = Field(config.path ?? "", 138, 0, 432); _custom.Controls.Add(_path);
-                _custom.Controls.Add(LabelAt("3  JSON 余额字段", 0, 43, 134, 27, 9F, FontStyle.Regular, Ink));
+                _custom.Controls.Add(LabelAt("JSON 余额字段", 0, 43, 134, 27, 9F, FontStyle.Regular, Ink));
                 _remainingPath = Field(config.remainingPath ?? "", 138, 43, 432); _custom.Controls.Add(_remainingPath);
-                _custom.Controls.Add(LabelAt("4  金额单位", 0, 86, 134, 27, 9F, FontStyle.Regular, Ink));
-                _unit = Field(config.unit ?? "", 138, 86, 130); _custom.Controls.Add(_unit);
-                _custom.Controls.Add(LabelAt("5  换算除数", 284, 86, 103, 27, 9F, FontStyle.Regular, Ink));
-                _divisor = new NumericUpDown(); _divisor.Location = new Point(389, 86); _divisor.Size = new Size(181, 27);
+                Controls.Add(LabelAt("金额规则", 25, 281, 134, 27, 9F, FontStyle.Regular, Ink));
+                _amountMode = new ComboBox(); _amountMode.Location = new Point(163, 281); _amountMode.Size = new Size(432, 30); _amountMode.DropDownStyle = ComboBoxStyle.DropDownList;
+                _amountMode.Items.AddRange(new object[] { "按接口自动读取", "手动设置单位、除数和余额范围" }); _amountMode.SelectedIndex = 0; Controls.Add(_amountMode);
+                _nonCustomManual = config.type != "custom" && config.amountMode == "manual";
+                _amount = new Panel(); _amount.Location = new Point(25, 324); _amount.Size = new Size(570, 147); Controls.Add(_amount);
+                _amount.Controls.Add(LabelAt("金额单位", 0, 0, 134, 27, 9F, FontStyle.Regular, Ink));
+                _unit = Field(config.unit ?? "", 138, 0, 130); _amount.Controls.Add(_unit);
+                _amount.Controls.Add(LabelAt("换算除数", 284, 0, 103, 27, 9F, FontStyle.Regular, Ink));
+                _divisor = new NumericUpDown(); _divisor.Location = new Point(389, 0); _divisor.Size = new Size(181, 27);
                 _divisor.DecimalPlaces = 6; _divisor.Minimum = 0.000001M; _divisor.Maximum = 1000000000000000M; _divisor.Value = 1M; _divisor.ThousandsSeparator = true;
-                if (config.divisor.HasValue) SetNumericValue(_divisor, config.divisor.Value); _custom.Controls.Add(_divisor);
-                _custom.Controls.Add(LabelAt("6  余额范围", 0, 130, 134, 27, 9F, FontStyle.Regular, Ink));
-                _kind = new ComboBox(); _kind.Location = new Point(138, 130); _kind.Size = new Size(432, 30); _kind.DropDownStyle = ComboBoxStyle.DropDownList;
-                _kind.Items.AddRange(new object[] { "额度（quota）", "密钥余额（key）", "账户余额（account）" }); _kind.SelectedIndex = config.balanceKind == "account" ? 2 : (config.balanceKind == "key" ? 1 : 0); _custom.Controls.Add(_kind);
-                Label help = LabelAt("路径示例：/api/balance；字段示例：data.balance。\r\n单位示例：USD、CNY、quota；显示余额 = 返回数值 ÷ 除数。\r\n余额范围可选账户、Key 或原始额度；请按站点文档填写。", 0, 175, 570, 70, 8.5F, FontStyle.Regular, Muted); help.AutoEllipsis = false; _custom.Controls.Add(help);
-                Label authHelp = LabelAt("New API 账户余额：请先在 CC Switch 用量配置填写同站点的 accessToken 和 userId；普通 API Key 不足以查询账户余额。\r\n自定义模式仅支持同站点 GET + API Key；要求 Cookie、网页登录或 POST 的接口暂不支持。", 25, 449, 575, 78, 8.5F, FontStyle.Regular, Muted); authHelp.AutoEllipsis = false; Controls.Add(authHelp);
-                _error = LabelAt("", 25, 532, 575, 49, 9F, FontStyle.Regular, Warning); _error.AutoEllipsis = false; Controls.Add(_error);
+                if (config.divisor.HasValue) SetNumericValue(_divisor, config.divisor.Value); _amount.Controls.Add(_divisor);
+                _amount.Controls.Add(LabelAt("余额范围", 0, 43, 134, 27, 9F, FontStyle.Regular, Ink));
+                _kind = new ComboBox(); _kind.Location = new Point(138, 43); _kind.Size = new Size(432, 30); _kind.DropDownStyle = ComboBoxStyle.DropDownList;
+                _kind.Items.AddRange(new object[] { "额度（quota）", "密钥余额（key）", "账户余额（account）" }); _kind.SelectedIndex = config.balanceKind == "account" ? 2 : (config.balanceKind == "key" ? 1 : 0); _amount.Controls.Add(_kind);
+                Label help = LabelAt("单位示例：USD、CNY、quota；显示余额 = 返回的原始余额 ÷ 除数。\r\n手动余额范围会标注“手动指定”；不能将未返回的余额变成金额。\r\n规则仅换算余额；实际用量保留接口报告的单位。", 0, 85, 570, 62, 8.5F, FontStyle.Regular, Muted); help.AutoEllipsis = false; _amount.Controls.Add(help);
+                Label authHelp = LabelAt("New API 账户余额需要 CC Switch 中同站点的 accessToken 和 userId；普通 API Key 可能无此权限。\r\n自定义接口示例：/api/balance，字段 data.balance。仅支持同站点 GET + API Key；要求 Cookie、网页登录或 POST 的接口暂不支持。", 25, 481, 575, 75, 8.5F, FontStyle.Regular, Muted); authHelp.AutoEllipsis = false; Controls.Add(authHelp);
+                _error = LabelAt("", 25, 559, 575, 32, 8.5F, FontStyle.Regular, Warning); _error.AutoEllipsis = false; Controls.Add(_error);
                 Button cancel = new Button(); cancel.Text = "取消"; cancel.Location = new Point(315, 595); cancel.Size = new Size(109, 34); cancel.DialogResult = DialogResult.Cancel; Controls.Add(cancel); CancelButton = cancel;
                 Button apply = ActionButton("应用到待保存设置", 437, 595, 164, 34); apply.Font = new Font(Font, FontStyle.Bold); apply.Click += delegate { Apply(); }; Controls.Add(apply); AcceptButton = apply;
-                _type.SelectedIndexChanged += delegate { UpdateMode(); }; UpdateMode();
+                _type.SelectedIndexChanged += delegate { UpdateMode(); };
+                _amountMode.SelectedIndexChanged += delegate { if (!_updatingMode) { _nonCustomManual = _amountMode.SelectedIndex == 1; UpdateAmountControls(); } }; UpdateMode();
                 AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96); ResumeLayout(true); PerformAutoScale();
                 Rectangle area = Screen.FromControl(this).WorkingArea;
                 if (Width > area.Width || Height > area.Height)
@@ -643,18 +664,25 @@ namespace RelayBalanceDesktop
                 }
             }
             private static TextBox Field(string value, int x, int y, int width) { TextBox box = new TextBox(); box.Text = value; box.Location = new Point(x, y); box.Size = new Size(width, 27); return box; }
-            private void UpdateMode() { _custom.Enabled = ((AdapterItem)_type.SelectedItem).Type == "custom"; if (_error != null) _error.Text = ""; }
+            private void UpdateMode()
+            {
+                bool custom = ((AdapterItem)_type.SelectedItem).Type == "custom"; _custom.Enabled = custom;
+                _updatingMode = true; try { _amountMode.SelectedIndex = custom || _nonCustomManual ? 1 : 0; _amountMode.Enabled = !custom; } finally { _updatingMode = false; }
+                UpdateAmountControls();
+            }
+            private void UpdateAmountControls() { _amount.Enabled = _amountMode.SelectedIndex == 1; if (_error != null) _error.Text = ""; }
             private void Apply()
             {
                 string type = ((AdapterItem)_type.SelectedItem).Type;
-                if (type != "custom") { Config = new AdapterConfig { type = type }; DialogResult = DialogResult.OK; Close(); return; }
+                bool manual = type == "custom" || _amountMode.SelectedIndex == 1;
+                if (!manual) { Config = new AdapterConfig { type = type, amountMode = "auto" }; DialogResult = DialogResult.OK; Close(); return; }
                 string path = _path.Text.Trim(); string remaining = _remainingPath.Text.Trim(); string unit = _unit.Text.Trim();
-                if (!Regex.IsMatch(path, "^/[A-Za-z0-9_./-]*$") || path.StartsWith("//", StringComparison.Ordinal) || path.Length > 256 || Array.Exists(path.Split('/'), delegate(string part) { return part == "." || part == ".."; }))
+                if (type == "custom" && (!Regex.IsMatch(path, "^/[A-Za-z0-9_./-]*$") || path.StartsWith("//", StringComparison.Ordinal) || path.Length > 256 || Array.Exists(path.Split('/'), delegate(string part) { return part == "." || part == ".."; })))
                 { _error.Text = "接口须为单个 / 开头的站内路径，仅含字母、数字、下划线、横线和点，不能含查询参数或跳转。"; _path.Focus(); return; }
-                if (!Regex.IsMatch(remaining, "^[A-Za-z_][A-Za-z0-9_]*(\\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))*$") || remaining.Length > 200 || Array.Exists(remaining.Split('.'), delegate(string part) { return part == "__proto__" || part == "constructor" || part == "prototype"; }))
+                if (type == "custom" && (!Regex.IsMatch(remaining, "^[A-Za-z_][A-Za-z0-9_]*(\\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))*$") || remaining.Length > 200 || Array.Exists(remaining.Split('.'), delegate(string part) { return part == "__proto__" || part == "constructor" || part == "prototype"; })))
                 { _error.Text = "请填写点分隔的 JSON 字段路径，例如 data.balance。"; _remainingPath.Focus(); return; }
                 if (!Regex.IsMatch(unit, "^(?:[A-Za-z]{2,12}|[¥$€£]|人民币|积分|点数)$")) { _error.Text = "请明确填写单位，例如 USD、CNY、quota 或积分。"; _unit.Focus(); return; }
-                Config = new AdapterConfig { type = "custom", path = path, remainingPath = remaining, unit = unit, divisor = (double)_divisor.Value, balanceKind = _kind.SelectedIndex == 2 ? "account" : (_kind.SelectedIndex == 1 ? "key" : "quota") };
+                Config = new AdapterConfig { type = type, amountMode = type == "custom" ? null : "manual", path = type == "custom" ? path : null, remainingPath = type == "custom" ? remaining : null, unit = unit, divisor = (double)_divisor.Value, balanceKind = _kind.SelectedIndex == 2 ? "account" : (_kind.SelectedIndex == 1 ? "key" : "quota") };
                 DialogResult = DialogResult.OK; Close();
             }
             private sealed class AdapterItem { public readonly string Type; public AdapterItem(string type) { Type = type; } public override string ToString() { return AdapterName(Type); } }
