@@ -131,9 +131,9 @@ namespace RelayBalanceDesktop
             _grid.DefaultCellStyle.Padding = new Padding(10, 10, 0, 10); _grid.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
             _grid.RowTemplate.MinimumHeight = 68; _grid.RowTemplate.Height = 68;
             _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders;
-            AddColumn("provider", "配置 / 应用", 177, 154); AddColumn("origin", "中转站地址", 191, 140);
+            AddColumn("provider", "配置 / 应用", 177, 154); AddColumn("ccSwitch", "CC Switch 状态", 114, 110); AddColumn("origin", "中转站地址", 191, 140);
             AddColumn("balance", "余额 / 单位", 132, 117); AddColumn("kind", "余额范围", 103, 88);
-            AddColumn("adapter", "查询适配", 139, 110); AddColumn("status", "状态", 127, 110); AddColumn("updated", "最近更新", 117, 104);
+            AddColumn("adapter", "查询适配", 139, 110); AddColumn("status", "查询状态", 127, 110); AddColumn("updated", "最近更新", 117, 104);
             _grid.SelectionChanged += delegate { if (!_updatingGrid) SelectGridProvider(); };
             _grid.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e) { if (e.RowIndex >= 0) ConfigureAdapter(); };
             tablePanel.Controls.Add(_grid);
@@ -286,13 +286,12 @@ namespace RelayBalanceDesktop
                     foreach (ProviderSnapshot p in data.providers)
                     {
                         if (p == null || String.IsNullOrEmpty(p.id)) continue; _providers[p.id] = p;
-                        int index = _grid.Rows.Add((p.current ? "● " : "") + p.name + "\r\n" + AppLabel(p.app), p.origin ?? "地址未配置", BalanceText(p), BalanceKindText(p), AdapterDisplay(p), StatusText(p), LocalDate(p.status == "stale" ? p.lastSuccessAt : p.updatedAt, false));
+                        int index = _grid.Rows.Add(p.name + "\r\n" + AppLabel(p.app), p.current ? "当前配置" : "非当前配置", p.origin ?? "地址未配置", BalanceText(p), BalanceKindText(p), AdapterDisplay(p), StatusText(p), LocalDate(p.status == "stale" ? p.lastSuccessAt : p.updatedAt, false));
                         DataGridViewRow row = _grid.Rows[index]; row.Tag = p.id;
-                        row.Cells[2].Style.ForeColor = p.status == "stale" ? Muted : (p.status == "ok" && p.lowBalance ? Warning : Ink);
-                        row.Cells[2].Style.SelectionForeColor = row.Cells[2].Style.ForeColor;
-                        row.Cells[5].Style.ForeColor = p.status == "ok" && !p.lowBalance && !MissingAccountBalance(p) ? Teal : ((p.status == "pending" || p.status == "disabled") ? Muted : Warning);
-                        row.Cells[5].Style.SelectionForeColor = row.Cells[5].Style.ForeColor;
-                        if (p.current) row.Cells[0].Style.ForeColor = Teal;
+                        row.Cells["balance"].Style.ForeColor = p.status == "stale" ? Muted : (p.status == "ok" && p.lowBalance ? Warning : Ink);
+                        row.Cells["balance"].Style.SelectionForeColor = row.Cells["balance"].Style.ForeColor;
+                        row.Cells["status"].Style.ForeColor = p.status == "ok" && !p.lowBalance && !MissingAccountBalance(p) ? Teal : ((p.status == "pending" || p.status == "disabled") ? Muted : Warning);
+                        row.Cells["status"].Style.SelectionForeColor = row.Cells["status"].Style.ForeColor;
                         if (p.status == "ok" && !MissingAccountBalance(p)) good++; else if (p.status != "pending" && p.status != "disabled") needsAttention++;
                         if (String.Equals(p.id, preserveId, StringComparison.Ordinal)) selectedIndex = index; HandleLowBalance(p);
                     }
@@ -308,7 +307,7 @@ namespace RelayBalanceDesktop
                 else _selectedId = null;
                 _emptyLabel.Text = _hiddenProviders.Count > 0 ? "列表中暂时没有监控项\r\n点击右上“已移出”可恢复配置，继续监控。" : "尚未发现可查询的中转站配置\r\n请先在 CC Switch 中添加 API 配置，再点击立即刷新。";
                 _emptyLabel.Visible = _grid.Rows.Count == 0; if (_emptyLabel.Visible) _emptyLabel.BringToFront();
-                _summaryLabel.Text = "正在监控 " + _providers.Count.ToString(CultureInfo.InvariantCulture) + " 个配置    ·    " + good.ToString(CultureInfo.InvariantCulture) + " 个已更新" + (needsAttention > 0 ? "    ·    " + needsAttention.ToString(CultureInfo.InvariantCulture) + " 个需关注" : "") + "    ·    ● 当前使用";
+                _summaryLabel.Text = "正在监控 " + _providers.Count.ToString(CultureInfo.InvariantCulture) + " 个配置    ·    " + good.ToString(CultureInfo.InvariantCulture) + " 个已更新" + (needsAttention > 0 ? "    ·    " + needsAttention.ToString(CultureInfo.InvariantCulture) + " 个需关注" : "");
                 List<string> removed = new List<string>(); foreach (string id in _lastLow.Keys) if (!_providers.ContainsKey(id)) removed.Add(id); foreach (string id in removed) _lastLow.Remove(id);
             }
             finally { _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders; _grid.ResumeLayout(); _updatingGrid = false; }
@@ -377,7 +376,7 @@ namespace RelayBalanceDesktop
                 _thresholdUnit.Text = ""; _selectedAdapter.Text = "查询适配：自动检测"; _retryDetectionButton.Visible = false; _adapterButton.Text = "手动配置…";
                 _details.Text = "先在 CC Switch 中添加带有 API 地址的配置。无法自动识别的站点可按站点文档设置查询适配。"; return;
             }
-            _selectedTitle.Text = p.name + "  /  " + AppLabel(p.app) + (p.current ? "  ·  当前使用" : "");
+            _selectedTitle.Text = p.name + "  /  " + AppLabel(p.app);
             _updatingSettings = true; try { double value; if (_thresholds.TryGetValue(p.id, out value)) SetNumericValue(_threshold, value); } finally { _updatingSettings = false; }
             _threshold.Enabled = !_waitingForSettings; _adapterButton.Enabled = !_waitingForSettings; _thresholdUnit.Text = UnitLabel(p.unit); _hideButton.Enabled = !_pendingVisibility.ContainsKey(p.id);
             _tips.SetToolTip(_threshold, "余额小于或等于此值时提醒。支持 USD、CNY、EUR、GBP、JPY、HKD；原始额度暂不触发金额提醒。设为 0 可停用正余额提醒。");

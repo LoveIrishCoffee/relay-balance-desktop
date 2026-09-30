@@ -15,8 +15,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("自动发现 CC Switch 配置的本地 API 余额监控")]
 [assembly: AssemblyCompany("Relay Balance contributors")]
 [assembly: AssemblyProduct("Relay Balance Desktop")]
-[assembly: AssemblyVersion("1.1.5.0")]
-[assembly: AssemblyFileVersion("1.1.5.0")]
+[assembly: AssemblyVersion("1.1.6.0")]
+[assembly: AssemblyFileVersion("1.1.6.0")]
 
 namespace RelayBalanceDesktop
 {
@@ -74,7 +74,7 @@ namespace RelayBalanceDesktop
                 providers = new List<ProviderSnapshot>
                 {
                     new ProviderSnapshot { id="p-00000000000000000001",name="示例中转 A · 高级套餐 · 团队共享账户",app="codex",origin="https://relay-a.example",status="ok",remaining=26.7500,unit="USD",todayUsage=1.2500,totalUsage=73.25,threshold=5,current=true,adapter="sub2api",adapterLabel="Sub2API",balanceKindLabel="账户钱包余额",message="示例数据；余额来自站点接口，用量为当前 API Key 实际花费",updatedAt=time,lastSuccessAt=time },
-                    new ProviderSnapshot { id="p-00000000000000000002",name="示例中转 B",app="claude",origin="https://relay-b.example",status="ok",remaining=118.4000,unit="CNY",totalUsage=482.10,threshold=5,adapter="newapi-token",adapterLabel="New API · Key 额度",balanceKindLabel="API Key 剩余额度",message="示例数据；按站点公布比例换算，非账户钱包",updatedAt=time,lastSuccessAt=time },
+                    new ProviderSnapshot { id="p-00000000000000000002",name="示例中转 B",app="claude",origin="https://relay-b.example",status="ok",remaining=118.4000,unit="CNY",totalUsage=482.10,threshold=5,current=true,adapter="newapi-token",adapterLabel="New API · Key 额度",balanceKindLabel="API Key 剩余额度",message="示例数据；按站点公布比例换算，非账户钱包",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000003",name="备用账户",app="codex",origin="https://relay-a.example",status="ok",remaining=4.6500,unit="USD",todayUsage=0,totalUsage=95.35,threshold=5,lowBalance=true,adapter="sub2api",adapterLabel="Sub2API",balanceKindLabel="账户钱包余额",message="示例数据；同站点不同配置分别显示",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000004",name="未获取账户余额的示例配置",app="gemini",origin="https://relay-c.example",status="ok",remaining=null,unit="quota",threshold=5,unlimited=true,adapter="newapi-token",adapterLabel="New API · Key 额度",balanceKindLabel="API Key 限额（非余额）",message="API Key未设限额，不代表账户资金无限；当前Key未返回账户余额",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000005",name="待适配站点",app="codex",origin="https://relay-d.example",status="unsupported",threshold=5,adapter="auto",adapterLabel="自动识别",message="适配失败，可点击“适配”重新尝试。手动配置可随时使用",updatedAt=time }
@@ -239,6 +239,28 @@ namespace RelayBalanceDesktop
                 form.Close();
             }
         }
+        private static void TestCurrentConfigurationPresentation()
+        {
+            using(BackendClient backend=new BackendClient())
+            using(BalanceForm form=new BalanceForm(backend,true))
+            {
+                form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-30000,-30000);form.ShowInTaskbar=false;form.Show();
+                Snapshot snapshot=DemoSnapshot();form.ApplySnapshot(snapshot);Application.DoEvents();
+                DataGridView grid=FormField<DataGridView>(form,"_grid");
+                if(grid.Columns["ccSwitch"].DisplayIndex!=1 || grid.Columns["status"].HeaderText!="查询状态")throw new Exception("CC Switch status is not separate from query status");
+                if((string)grid.Rows[0].Cells["ccSwitch"].Value!="当前配置" || (string)grid.Rows[1].Cells["ccSwitch"].Value!="当前配置" || (string)grid.Rows[2].Cells["ccSwitch"].Value!="非当前配置")throw new Exception("per-application current configuration labels");
+                grid.CurrentCell=grid.Rows[2].Cells["provider"];Application.DoEvents();
+                if((string)grid.Rows[0].Cells["ccSwitch"].Value!="当前配置" || (string)grid.Rows[2].Cells["ccSwitch"].Value!="非当前配置")throw new Exception("row selection changes current configuration");
+                foreach(DataGridViewRow row in grid.Rows)
+                    if(((string)row.Cells["provider"].Value).StartsWith("● ") || row.Cells["provider"].InheritedStyle.ForeColor!=grid.DefaultCellStyle.ForeColor)throw new Exception("current configuration decorates provider name");
+                snapshot.providers[0].current=false;snapshot.providers[2].current=true;
+                form.ApplySnapshot(snapshot);Application.DoEvents();
+                if(grid.CurrentRow==null || (string)grid.CurrentRow.Tag!=snapshot.providers[2].id || !grid.Rows[2].Selected)throw new Exception("current configuration refresh changes selected row");
+                if((string)grid.Rows[0].Cells["ccSwitch"].Value!="非当前配置" || (string)grid.Rows[1].Cells["ccSwitch"].Value!="当前配置" || (string)grid.Rows[2].Cells["ccSwitch"].Value!="当前配置")throw new Exception("current configuration change not reflected");
+                if(FormField<Label>(form,"_summaryLabel").Text.Contains("●") || FormField<Label>(form,"_selectedTitle").Text.Contains("当前使用"))throw new Exception("ambiguous current-use label remains");
+                form.Close();
+            }
+        }
         private static void TestBalancePresentation()
         {
             using(BackendClient backend=new BackendClient())
@@ -247,7 +269,7 @@ namespace RelayBalanceDesktop
                 form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-30000,-30000);form.ShowInTaskbar=false;form.Show();
                 Snapshot snapshot=DemoSnapshot();form.ApplySnapshot(snapshot);Application.DoEvents();AssertContentTitleRemoved(form);
                 DataGridView grid=FormField<DataGridView>(form,"_grid");
-                if((string)grid.Rows[3].Cells[2].Value!="未获取账户余额" || (string)grid.Rows[3].Cells[5].Value!="余额未获取")throw new Exception("unlimited key presented as account balance");
+                if((string)grid.Rows[3].Cells["balance"].Value!="未获取账户余额" || (string)grid.Rows[3].Cells["status"].Value!="余额未获取")throw new Exception("unlimited key presented as account balance");
                 if(!FormField<Label>(form,"_summaryLabel").Text.Contains("2 个需关注"))throw new Exception("missing account balance not flagged");
                 grid.CurrentCell=grid.Rows[3].Cells[0];Application.DoEvents();
                 if(!FormField<Label>(form,"_details").Text.Contains("当前Key未返回账户余额"))throw new Exception("unlimited key explanation missing");
@@ -257,11 +279,11 @@ namespace RelayBalanceDesktop
                 Dictionary<string,bool> pending=FormField<Dictionary<string,bool>>(form,"_pendingVisibility");pending[snapshot.providers[3].id]=true;
                 typeof(BalanceForm).GetMethod("ShowSelection",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(form,null);if(getBalance.Enabled)throw new Exception("retrieval visibility guard");pending.Clear();
                 snapshot.providers[3].adapterConfig=new AdapterConfig{type="newapi-token",amountMode="manual",unit="CNY",divisor=500000,balanceKind="account"};snapshot.providers[3].unit="CNY";snapshot.providers[3].usageUnit="USD";snapshot.providers[3].todayUsage=1.25;
-                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells[2].Value!="未获取账户余额" || !FormField<Label>(form,"_details").Text.Contains("1.25 USD"))throw new Exception("manual amount fabricated balance or changed usage unit");
+                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells["balance"].Value!="未获取账户余额" || !FormField<Label>(form,"_details").Text.Contains("1.25 USD"))throw new Exception("manual amount fabricated balance or changed usage unit");
                 snapshot.providers[3].adapter="newapi-account";snapshot.providers[3].balanceKindLabel="账户余额";snapshot.providers[3].remaining=26.75;snapshot.providers[3].unit="USD";
-                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells[2].Value!="26.75 USD")throw new Exception("real account balance hidden");
+                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells["balance"].Value!="26.75 USD")throw new Exception("real account balance hidden");
                 snapshot.providers[3].adapter="sub2api";snapshot.providers[3].balanceKindLabel="订阅剩余额度";snapshot.providers[3].remaining=null;
-                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells[2].Value!="不限额")throw new Exception("unlimited subscription changed");
+                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells["balance"].Value!="不限额")throw new Exception("unlimited subscription changed");
                 snapshot.providers.Clear();form.ApplySnapshot(snapshot);Application.DoEvents();
                 AssertActionReachable(FormField<Button>(form,"_hiddenButton"));if(FormField<Button>(form,"_hideButton").Enabled)throw new Exception("empty list remove enabled");
                 snapshot.hiddenProviders.Clear();form.ApplySnapshot(snapshot);Application.DoEvents();AssertActionReachable(FormField<Button>(form,"_hiddenButton"));
@@ -282,7 +304,7 @@ namespace RelayBalanceDesktop
                 Snapshot snapshot=DemoSnapshot();snapshot.providers[0].adapterConfig=new AdapterConfig{type="newapi-token",amountMode="manual",unit="CNY",divisor=500000,balanceKind="key"};
                 snapshot.providers[0].unit="CNY";snapshot.providers[0].usageUnit="USD";form.ApplySnapshot(snapshot);Application.DoEvents();
                 DataGridView grid=FormField<DataGridView>(form,"_grid");grid.CurrentCell=grid.Rows[0].Cells[0];Application.DoEvents();
-                if(!((string)grid.Rows[0].Cells[3].Value).Contains("手动指定") || !FormField<Label>(form,"_details").Text.Contains("1.25 USD"))throw new Exception("manual scope or usage unit presentation");
+                if(!((string)grid.Rows[0].Cells["kind"].Value).Contains("手动指定") || !FormField<Label>(form,"_details").Text.Contains("1.25 USD"))throw new Exception("manual scope or usage unit presentation");
                 CaptureAdapterDialog(form,delegate(Form dialog) {
                     ComboBox type=DialogField<ComboBox>(dialog,"_type"),mode=DialogField<ComboBox>(dialog,"_amountMode"),kind=DialogField<ComboBox>(dialog,"_kind");
                     TextBox unit=DialogField<TextBox>(dialog,"_unit"),path=DialogField<TextBox>(dialog,"_path"),field=DialogField<TextBox>(dialog,"_remainingPath");NumericUpDown divisor=DialogField<NumericUpDown>(dialog,"_divisor");
@@ -434,9 +456,9 @@ namespace RelayBalanceDesktop
                     CheckBox notifications=(CheckBox)typeof(BalanceForm).GetField("_notifications",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form);
                     if(notifications.Checked)throw new Exception("notification reload");
                 }
-                TestProviderActions();
+                TestProviderActions();TestCurrentConfigurationPresentation();
                 TestBalancePresentation();TestAmountConfiguration();TestVisibilityLifecycle(runtime,fixture);
-                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\",\"wrapped provider names and apps fit after refresh and resize\",\"content title removed\",\"hidden providers validated\",\"remove and restore through actual buttons\",\"visibility preserves unsaved settings\",\"visibility does not modify CC Switch\",\"unlimited key is not an account balance\",\"real account balance and unlimited subscription preserved\",\"missing balance retrieval action and busy guards\",\"built-in manual amount round trip and mode switching\",\"manual amount validation and custom compatibility\",\"usage unit remains independent of manual balance unit\"]}",new UTF8Encoding(false));
+                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\",\"wrapped provider names and apps fit after refresh and resize\",\"content title removed\",\"hidden providers validated\",\"remove and restore through actual buttons\",\"visibility preserves unsaved settings\",\"visibility does not modify CC Switch\",\"unlimited key is not an account balance\",\"real account balance and unlimited subscription preserved\",\"missing balance retrieval action and busy guards\",\"built-in manual amount round trip and mode switching\",\"manual amount validation and custom compatibility\",\"usage unit remains independent of manual balance unit\",\"current configuration remains independent of row selection\"]}",new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception ex) { File.WriteAllText(report,new JavaScriptSerializer().Serialize(new {passed=false,error=ex.Message}),new UTF8Encoding(false));return 1; }
