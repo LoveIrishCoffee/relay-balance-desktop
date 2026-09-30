@@ -463,3 +463,128 @@ test('missing credentials and an already pending query cannot start adaptation',
   const pending = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('pending')]), queryFn: async () => { calls++; await gate; return parsed(1); } });
   const initial = pending.refresh(); await new Promise(setImmediate); await assert.rejects(pending.retryDetection(pending.snapshot().providers[0].id)); release(); await initial; assert.equal(calls, 1);
 });
+
+test('visibility settings validate stable IDs, remove duplicates and keep defaults immutable', () => {
+  const before = JSON.stringify(DEFAULT_SETTINGS);
+  assert.deepEqual(validateSettings({}).hiddenProviders, []);
+  assert.deepEqual(validateSettings({ hiddenProviders: [ID_A, ID_B, ID_A] }).hiddenProviders, [ID_A, ID_B]);
+  for (const hiddenProviders of ['all', {}, [null], ['constructor'], ['p-nope'], ['https://relay.example'], Array.from({ length: 10001 }, (_, i) => 'p-' + i.toString(16).padStart(20, '0'))]) assert.throws(() => validateSettings({ hiddenProviders }));
+  assert.equal(JSON.stringify(DEFAULT_SETTINGS), before);
+});
+
+test('hidden providers expose only identity and stop periodic, manual and explicit queries', async t => {
+  let calls = 0, now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => { calls++; return parsed(2); } });
+  await monitor.refresh(); const id = monitor.snapshot().providers[0].id; const original = JSON.stringify(monitor.settings);
+  const hiddenSettings = monitor.settingsWithVisibility(id, true); assert.equal(JSON.stringify(monitor.settings), original);
+  monitor.settings = hiddenSettings; await monitor.checkForChanges(); now += 301000; await monitor.refresh(); await monitor.refresh({ force: true });
+  const state = monitor.snapshot(); assert.deepEqual(state.providers, []); assert.equal(state.hiddenProviders.length, 1); assert.equal(calls, 1);
+  assert.deepEqual(Object.keys(state.hiddenProviders[0]).sort(), ['app', 'id', 'name', 'origin']);
+  assert.equal(state.hiddenProviders[0].id, id); assert.equal(JSON.stringify(state).includes('fixture-key'), false); assert.equal(Object.hasOwn(state.hiddenProviders[0], 'remaining'), false);
+  await assert.rejects(monitor.retryDetection(id)); assert.equal(calls, 1);
+});
+
+test('hidden identity persists across restart, rename, key and origin changes until restored', async () => {
+  let rows = [row('a')], calls = 0;
+  const dependencies = { discoverFn: () => selectCredentials(rows), queryFn: async () => { calls++; return parsed(calls); } };
+  const monitor = new Monitor(emptySettings(), dependencies); await monitor.refresh(); const id = monitor.snapshot().providers[0].id;
+  monitor.settings = monitor.settingsWithVisibility(id, true); await monitor.checkForChanges();
+  rows = [row('a', 'https://replacement.example/api/v1', 'rotated-fixture', { name: '改名后配置' })]; await monitor.refresh({ force: true }); assert.equal(calls, 1);
+  const restarted = new Monitor(JSON.parse(JSON.stringify(monitor.settings)), dependencies); await restarted.refresh();
+  assert.deepEqual(restarted.snapshot().providers, []); assert.equal(restarted.snapshot().hiddenProviders[0].id, id); assert.equal(restarted.snapshot().hiddenProviders[0].name, '改名后配置'); assert.equal(restarted.snapshot().hiddenProviders[0].origin, 'https://replacement.example'); assert.equal(calls, 1);
+  restarted.settings = restarted.settingsWithVisibility(id, false); await restarted.checkForChanges(); const restored = restarted.snapshot();
+  assert.equal(calls, 2); assert.deepEqual(restored.hiddenProviders, []); assert.equal(restored.providers[0].remaining, 2); assert.equal(restored.providers[0].status, 'ok');
+});
+
+test('visibility rejects invalid IDs, missing entries and non-boolean choices', async () => {
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => parsed(8) }); await monitor.refresh(); const id = monitor.snapshot().providers[0].id;
+  for (const invalid of [null, undefined, 'constructor', 'p-00000000000000000000']) assert.throws(() => monitor.settingsWithVisibility(invalid, true));
+  for (const hidden of [null, undefined, 0, 1, 'true', {}, []]) assert.throws(() => monitor.settingsWithVisibility(id, hidden));
+  assert.deepEqual(monitor.snapshot().providers.map(p => p.id), [id]);
+});
+
+test('deleted hidden providers leave the hidden list without losing their saved preference', async () => {
+  let rows = [row('a')]; const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials(rows), queryFn: async () => parsed(1) }); await monitor.refresh(); const id = monitor.snapshot().providers[0].id;
+  monitor.settings = monitor.settingsWithVisibility(id, true); await monitor.checkForChanges(); rows = []; await monitor.checkForChanges();
+  assert.deepEqual(monitor.snapshot().hiddenProviders, []); assert.deepEqual(monitor.snapshot().providers, []); assert.ok(monitor.settings.hiddenProviders.includes(id));
+  rows = [row('a')]; await monitor.checkForChanges(); assert.deepEqual(monitor.snapshot().providers, []); assert.equal(monitor.snapshot().hiddenProviders[0].id, id);
+});
+
+test('a hidden in-flight response cannot reappear or contaminate a restored entry', async () => {
+  let calls = 0, releaseOld; const oldGate = new Promise(resolve => { releaseOld = resolve; });
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => { calls++; if (calls === 1) { await oldGate; return parsed(999); } return parsed(7); } });
+  const first = monitor.refresh(); await new Promise(setImmediate); const id = monitor.snapshot().providers[0].id;
+  monitor.settings = monitor.settingsWithVisibility(id, true); const hidden = monitor.checkForChanges(); assert.deepEqual(monitor.snapshot().providers, []);
+  releaseOld(); await Promise.all([first, hidden]); assert.deepEqual(monitor.snapshot().providers, []); assert.equal(calls, 1);
+  monitor.settings = monitor.settingsWithVisibility(id, false); await monitor.checkForChanges(); assert.equal(calls, 2); assert.equal(monitor.snapshot().providers[0].remaining, 7);
+});
+
+test('hiding and restoring before an older query completes discards that older result', async () => {
+  let calls = 0, releaseOld; const oldGate = new Promise(resolve => { releaseOld = resolve; });
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => { calls++; if (calls === 1) { await oldGate; return parsed(999); } return parsed(8); } });
+  const first = monitor.refresh(); await new Promise(setImmediate); const id = monitor.snapshot().providers[0].id;
+  monitor.settings = monitor.settingsWithVisibility(id, true); const hidden = monitor.checkForChanges(); monitor.settings = monitor.settingsWithVisibility(id, false); const restored = monitor.checkForChanges();
+  assert.equal(monitor.snapshot().providers[0].remaining, null); releaseOld(); await Promise.all([first, hidden, restored]);
+  assert.equal(calls, 2); assert.equal(monitor.snapshot().providers[0].remaining, 8); assert.equal(monitor.snapshot().providers[0].status, 'ok');
+});
+
+test('hiding and restoring cannot bypass a provider retry deadline', async t => {
+  let now = Date.now(), calls = 0; t.mock.method(Date, 'now', () => now);
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => { calls++; if (calls === 1) throw new QueryError('rate_limit', '请等待', 120); return parsed(6); } });
+  await monitor.refresh(); const id = monitor.snapshot().providers[0].id;
+  monitor.settings = monitor.settingsWithVisibility(id, true); await monitor.checkForChanges(); monitor.settings = monitor.settingsWithVisibility(id, false); await monitor.checkForChanges(); await monitor.refresh({ force: true }); assert.equal(calls, 1);
+  now += 120000; await monitor.checkForChanges(); assert.equal(calls, 2); assert.equal(monitor.snapshot().providers[0].remaining, 6);
+});
+
+test('hiding and restoring retains the explicit retry click throttle', async () => {
+  let calls = 0;
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => { calls++; throw new QueryError('network_error', '连接失败'); } });
+  await monitor.refresh(); const id = monitor.snapshot().providers[0].id; await monitor.retryDetection(id);
+  monitor.settings = monitor.settingsWithVisibility(id, true); await monitor.checkForChanges(); monitor.settings = monitor.settingsWithVisibility(id, false); await monitor.checkForChanges();
+  assert.equal(calls, 3); await assert.rejects(monitor.retryDetection(id), { code: 'retry_soon' }); assert.equal(calls, 3);
+});
+
+test('account quota ignores a token unlimited flag and still requires a real account balance', () => {
+  const status = { data: { quota_per_unit: 100000, quota_display_type: 'USD' } };
+  for (const quota of [0, 120000]) {
+    const result = parseNewApi({ success: true, data: { quota, used_quota: 40000, unlimited_quota: true } }, status, { account: true });
+    assert.ok(Math.abs(result.remaining - quota / 100000) < 1e-12); assert.equal(result.unit, 'USD'); assert.equal(result.unlimited, false); assert.match(result.balanceKindLabel, /账户/);
+  }
+  assert.throws(() => parseNewApi({ data: { unlimited_quota: true } }, status, { account: true }), QueryError);
+});
+
+test('unauthorized model keys never fall back to billing sentinel balances', async () => {
+  const seen = [];
+  const mockFetch = async url => {
+    seen.push(url.pathname);
+    if (url.pathname.includes('billing')) return response({ hard_limit_usd: 100000000, total_usage: 0 });
+    return response({ error: 'fixture-key has no account permission' }, { status: 401 });
+  };
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: (c, adapter) => queryProvider(c, adapter, mockFetch) });
+  await monitor.refresh(); const state = monitor.snapshot().providers[0];
+  assert.deepEqual(seen, ['/v1/usage', '/api/usage/token/']); assert.equal(state.status, 'error'); assert.equal(state.remaining, null); assert.equal(state.unlimited, false); assert.equal(state.lowBalance, false); assert.equal(JSON.stringify(state).includes('fixture-key'), false);
+});
+
+test('a late rate-limit response still delays the same credentials after hide and restore', async t => {
+  let now = Date.now(), calls = 0, release; t.mock.method(Date, 'now', () => now);
+  const gate = new Promise(resolve => { release = resolve; });
+  const mockFetch = async () => { calls++; if (calls === 1) { await gate; return response({}, { status: 429, headers: { 'Retry-After': '120' } }); } return response(usage(8)); };
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: (c, adapter, _fetch, isActive) => queryProvider(c, adapter, mockFetch, isActive) });
+  const first = monitor.refresh(); await new Promise(setImmediate); const id = monitor.snapshot().providers[0].id;
+  monitor.settings = monitor.settingsWithVisibility(id, true); const hidden = monitor.checkForChanges(); monitor.settings = monitor.settingsWithVisibility(id, false); const restored = monitor.checkForChanges();
+  release(); await Promise.all([first, hidden, restored]); await monitor.refresh({ force: true });
+  assert.equal(calls, 1); assert.equal(monitor.snapshot().providers[0].remaining, null); assert.equal(monitor.snapshot().providers[0].lastSuccessAt, null);
+  now += 120000; await monitor.checkForChanges(); assert.equal(calls, 2); assert.equal(monitor.snapshot().providers[0].remaining, 8); assert.equal(monitor.snapshot().providers[0].status, 'ok');
+});
+
+test('hiding a pending query prevents both automatic and cached protocol fallback requests', async () => {
+  for (const cached of [false, true]) {
+    let seed = cached, release; const gate = new Promise(resolve => { release = resolve; }); const routes = [];
+    const mockFetch = async url => { routes.push(url.pathname); if (seed) { seed = false; return response(usage(3)); } await gate; return response({}, { status: 404 }); };
+    const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: (c, adapter, _fetch, isActive) => queryProvider(c, adapter, mockFetch, isActive) });
+    if (cached) await monitor.refresh();
+    const pending = monitor.refresh({ force: true }); await new Promise(setImmediate); const id = monitor.snapshot().providers[0].id;
+    monitor.settings = monitor.settingsWithVisibility(id, true); const hidden = monitor.checkForChanges(); release(); await Promise.all([pending, hidden]);
+    assert.deepEqual(routes, cached ? ['/v1/usage', '/v1/usage'] : ['/v1/usage']); assert.deepEqual(monitor.snapshot().providers, []); assert.equal(monitor.snapshot().hiddenProviders[0].id, id);
+  }
+});

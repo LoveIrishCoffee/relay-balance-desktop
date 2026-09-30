@@ -15,6 +15,10 @@ async function refresh(){
   try {const pending=monitor.refresh();publish();await pending;publish();}
   catch {send('error','余额查询失败，请稍后刷新');}
 }
+async function detect(providerId){
+  try {const pending=monitor.retryDetection(providerId);publish();await pending;publish();}
+  catch {send('error','适配未完成，请稍后重试');}
+}
 async function watch(){
   if(watching||closed)return;
   watching=true;
@@ -34,16 +38,20 @@ input.on('line',line=>{
     try {
       const request=JSON.parse(line);
       if(!request||typeof request!=='object'||Array.isArray(request))throw new Error('invalid');
-      if(request.method==='refresh')await refresh();
-      else if(request.method==='detect'){
-        const pending=monitor.retryDetection(request.providerId);publish();await pending;publish();
-      }
+      // Network work must not hold the settings queue: users can remove a row while it queries.
+      if(request.method==='refresh')void refresh();
+      else if(request.method==='detect')void detect(request.providerId);
       else if(request.method==='status')send('snapshot',monitor.snapshot());
+      else if(request.method==='visibility'){
+        const settings=monitor.settingsWithVisibility(request.providerId,request.hidden);
+        await saveJson(path.join(runtimeDir,'settings.json'),settings);
+        monitor.settings=settings;monitor.reconcile();publish();void watch();
+      }
       else if(request.method==='settings'){
         const incoming=validateSettings(request.settings);
         const settings=validateSettings({intervalSeconds:incoming.intervalSeconds,
           thresholds:{...monitor.settings.thresholds,...incoming.thresholds},
-          adapters:{...monitor.settings.adapters,...incoming.adapters}});
+          adapters:{...monitor.settings.adapters,...incoming.adapters},hiddenProviders:monitor.settings.hiddenProviders});
         await saveJson(path.join(runtimeDir,'settings.json'),settings);
         monitor.settings=settings;schedule();send('settings_saved',monitor.snapshot());void watch();
       }else if(request.method==='stop')shutdown();

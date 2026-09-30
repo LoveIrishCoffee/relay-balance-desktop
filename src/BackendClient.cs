@@ -41,9 +41,17 @@ namespace RelayBalanceDesktop
         public double? totalUsage { get; set; }
         public double threshold { get; set; }
     }
+    public sealed class HiddenProviderSnapshot
+    {
+        public string id { get; set; }
+        public string name { get; set; }
+        public string app { get; set; }
+        public string origin { get; set; }
+    }
     public sealed class Snapshot
     {
         public List<ProviderSnapshot> providers { get; set; }
+        public List<HiddenProviderSnapshot> hiddenProviders { get; set; }
         public string checkedAt { get; set; }
         public string message { get; set; }
         public int intervalSeconds { get; set; }
@@ -129,7 +137,7 @@ namespace RelayBalanceDesktop
         }
         public static bool ValidSnapshot(Snapshot data)
         {
-            if (data == null || data.providers == null || data.providers.Count > 1000 || data.intervalSeconds < 60 || data.intervalSeconds > 86400) return false;
+            if (data == null || data.providers == null || data.providers.Count + (data.hiddenProviders == null ? 0 : data.hiddenProviders.Count) > 1000 || data.intervalSeconds < 60 || data.intervalSeconds > 86400) return false;
             HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (ProviderSnapshot p in data.providers)
             {
@@ -138,6 +146,9 @@ namespace RelayBalanceDesktop
                 if (p.status != "pending" && p.status != "ok" && p.status != "missing" && p.status != "unsupported" && p.status != "error" && p.status != "stale" && p.status != "disabled") return false;
                 if (p.adapterConfig != null && p.adapterConfig.divisor.HasValue && (!Finite(p.adapterConfig.divisor) || p.adapterConfig.divisor.Value <= 0)) return false;
             }
+            if (data.hiddenProviders != null)
+                foreach (HiddenProviderSnapshot hidden in data.hiddenProviders)
+                    if (hidden == null || String.IsNullOrEmpty(hidden.id) || !Regex.IsMatch(hidden.id, "^p-[0-9a-f]{20}$", RegexOptions.CultureInvariant) || !seen.Add(hidden.id)) return false;
             return true;
         }
         private static bool Finite(double? value) { return !value.HasValue || (!Double.IsNaN(value.Value) && !Double.IsInfinity(value.Value)); }
@@ -165,6 +176,11 @@ namespace RelayBalanceDesktop
         public void SaveSettings(Dictionary<string, double> thresholds, Dictionary<string, AdapterConfig> adapters, int intervalSeconds)
         {
             Send(new { method = "settings", settings = new { intervalSeconds = intervalSeconds, thresholds = thresholds, adapters = adapters } });
+        }
+        public void SetProviderHidden(string id, bool hidden)
+        {
+            if (String.IsNullOrEmpty(id) || !Regex.IsMatch(id, "^p-[0-9a-f]{20}$", RegexOptions.CultureInvariant)) { RaiseError("请选择有效的中转站配置"); return; }
+            Send(new { method = "visibility", providerId = id, hidden = hidden });
         }
         public void Stop()
         {

@@ -25,12 +25,15 @@ namespace RelayBalanceDesktop
         private readonly HashSet<string> _editedThresholds = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> _editedAdapters = new HashSet<string>(StringComparer.Ordinal);
         private readonly Dictionary<string, bool> _lastLow = new Dictionary<string, bool>(StringComparer.Ordinal);
+        private readonly Dictionary<string, bool> _pendingVisibility = new Dictionary<string, bool>(StringComparer.Ordinal);
+        private List<HiddenProviderSnapshot> _hiddenProviders = new List<HiddenProviderSnapshot>();
+        private HiddenProvidersDialog _hiddenDialog;
         private readonly ToolTip _tips = new ToolTip();
         private TableLayoutPanel _layout;
         private Size _contentMinimum;
         private bool _resizingCanvas;
         private DataGridView _grid;
-        private Button _refreshButton, _saveButton, _adapterButton, _retryDetectionButton;
+        private Button _refreshButton, _saveButton, _adapterButton, _retryDetectionButton, _hideButton, _hiddenButton;
         private NumericUpDown _threshold;
         private ComboBox _interval;
         private CheckBox _notifications;
@@ -97,15 +100,16 @@ namespace RelayBalanceDesktop
             TableLayoutPanel layout = new TableLayoutPanel(); _layout = layout; layout.Dock = DockStyle.Fill;
             layout.Padding = new Padding(24, 17, 24, 10); layout.ColumnCount = 1; layout.RowCount = 6;
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 199F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
             Controls.Add(layout);
-            Panel header = new Panel(); header.Size = new Size(1072, 82); header.Dock = DockStyle.Fill; header.Margin = Padding.Empty;
-            header.Controls.Add(LabelAt("中转站余额", 0, 0, 500, 37, 22F, FontStyle.Bold, Ink));
-            header.Controls.Add(LabelAt("自动发现 CC Switch 配置 · 新增或切换中转站后自动更新", 2, 45, 760, 24, 10F, FontStyle.Regular, Muted));
-            _refreshButton = ActionButton("立即刷新", 936, 10, 136, 40); _refreshButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _refreshButton.Click += delegate { RefreshBalances(); }; header.Controls.Add(_refreshButton); layout.Controls.Add(header, 0, 0);
+            TableLayoutPanel header = new TableLayoutPanel(); header.Dock = DockStyle.Fill; header.Margin = Padding.Empty; header.ColumnCount = 3; header.RowCount = 1;
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 157F)); header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 148F)); header.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            Label intro = LabelAt("自动读取 CC Switch 配置 · 新增或切换后自动更新", 0, 0, 740, 34, 10F, FontStyle.Regular, Muted); intro.Dock = DockStyle.Fill; intro.Margin = Padding.Empty; header.Controls.Add(intro, 0, 0);
+            _hiddenButton = SecondaryButton("已移出 (0)", 0, 0, 145, 38); _hiddenButton.Dock = DockStyle.Fill; _hiddenButton.Margin = new Padding(0, 4, 12, 8); _hiddenButton.Click += delegate { ShowHiddenProviders(); }; header.Controls.Add(_hiddenButton, 1, 0);
+            _refreshButton = ActionButton("立即刷新", 0, 0, 136, 38); _refreshButton.Dock = DockStyle.Fill; _refreshButton.Margin = new Padding(12, 4, 0, 8);
+            _refreshButton.Click += delegate { RefreshBalances(); }; header.Controls.Add(_refreshButton, 2, 0); layout.Controls.Add(header, 0, 0);
             _summaryLabel = LabelAt("正在读取本机配置…", 0, 0, 1000, 29, 9F, FontStyle.Regular, Muted);
             _summaryLabel.Dock = DockStyle.Fill; _summaryLabel.Margin = Padding.Empty; layout.Controls.Add(_summaryLabel, 0, 1);
             Panel tablePanel = new BorderPanel(); tablePanel.Dock = DockStyle.Fill; tablePanel.Padding = new Padding(1); tablePanel.Margin = new Padding(0, 0, 0, 12);
@@ -139,7 +143,11 @@ namespace RelayBalanceDesktop
             selectionLayout.ColumnCount = 1; selectionLayout.RowCount = 3; selectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             selectionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F)); selectionLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48F)); selectionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); selection.Controls.Add(selectionLayout);
             _selectedTitle = LabelAt("选择配置，查看详情和设置", 0, 0, 1018, 29, 12F, FontStyle.Bold, Ink);
-            _selectedTitle.Dock = DockStyle.Fill; _selectedTitle.Margin = Padding.Empty; selectionLayout.Controls.Add(_selectedTitle, 0, 0);
+            _selectedTitle.Dock = DockStyle.Fill; _selectedTitle.Margin = Padding.Empty;
+            TableLayoutPanel selectionHeading = new TableLayoutPanel(); selectionHeading.Dock = DockStyle.Fill; selectionHeading.Margin = Padding.Empty; selectionHeading.ColumnCount = 2; selectionHeading.RowCount = 1;
+            selectionHeading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); selectionHeading.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140F)); selectionHeading.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); selectionHeading.Controls.Add(_selectedTitle, 0, 0);
+            _hideButton = SecondaryButton("移出列表", 0, 0, 134, 30); _hideButton.Dock = DockStyle.Fill; _hideButton.Margin = new Padding(6, 0, 0, 2); _hideButton.Enabled = false;
+            _hideButton.Click += delegate { if (_selectedId != null) SetProviderVisibility(_selectedId, true); }; _tips.SetToolTip(_hideButton, "仅停止本软件监控，不修改 CC Switch。可从“已移出”随时恢复。"); selectionHeading.Controls.Add(_hideButton, 1, 0); selectionLayout.Controls.Add(selectionHeading, 0, 0);
             // Separate cells keep the descriptive label out of both button hit areas at every DPI.
             TableLayoutPanel settingsRow = new TableLayoutPanel(); settingsRow.Dock = DockStyle.Fill; settingsRow.Margin = Padding.Empty; settingsRow.ColumnCount = 4; settingsRow.RowCount = 1;
             settingsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 390F)); settingsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); settingsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 153F)); settingsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 171F)); settingsRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); selectionLayout.Controls.Add(settingsRow, 0, 1);
@@ -194,6 +202,11 @@ namespace RelayBalanceDesktop
             button.FlatStyle = FlatStyle.Flat; button.FlatAppearance.BorderSize = 0; button.FlatAppearance.MouseOverBackColor = Color.FromArgb(0, 111, 103);
             button.BackColor = Teal; button.ForeColor = Color.White; button.Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold, GraphicsUnit.Point);
             button.Cursor = Cursors.Hand; button.UseVisualStyleBackColor = false; return button;
+        }
+        private static Button SecondaryButton(string text, int x, int y, int width, int height)
+        {
+            Button button = ActionButton(text, x, y, width, height); button.BackColor = Color.White; button.ForeColor = Teal;
+            button.FlatAppearance.BorderSize = 1; button.FlatAppearance.BorderColor = Color.FromArgb(197, 219, 216); button.FlatAppearance.MouseOverBackColor = Color.FromArgb(235, 248, 245); return button;
         }
         private void BuildTray()
         {
@@ -256,6 +269,8 @@ namespace RelayBalanceDesktop
         {
             if (_stopped) return;
             _latestSnapshot = data; _refreshing = data.refreshing;
+            _hiddenProviders = data.hiddenProviders == null ? new List<HiddenProviderSnapshot>() : new List<HiddenProviderSnapshot>(data.hiddenProviders);
+            _hiddenButton.Text = "已移出 (" + _hiddenProviders.Count.ToString(CultureInfo.InvariantCulture) + ")";
             _refreshButton.Enabled = !data.refreshing; _refreshButton.Text = data.refreshing ? "正在刷新…" : "立即刷新";
             MergeSettings(data); string preserveId = _selectedId; int scroll = _grid.FirstDisplayedScrollingRowIndex;
             _updatingGrid = true; _grid.SuspendLayout();
@@ -273,11 +288,11 @@ namespace RelayBalanceDesktop
                         row.Cells[0].ToolTipText = p.name + " / " + AppLabel(p.app) + (p.current ? " · 当前使用" : ""); row.Cells[1].ToolTipText = p.origin ?? "";
                         row.Cells[2].Style.ForeColor = p.status == "stale" ? Muted : (p.status == "ok" && p.lowBalance ? Warning : Ink);
                         row.Cells[2].Style.SelectionForeColor = row.Cells[2].Style.ForeColor;
-                        row.Cells[5].Style.ForeColor = p.status == "ok" && !p.lowBalance ? Teal : ((p.status == "pending" || p.status == "disabled") ? Muted : Warning);
+                        row.Cells[5].Style.ForeColor = p.status == "ok" && !p.lowBalance && !MissingAccountBalance(p) ? Teal : ((p.status == "pending" || p.status == "disabled") ? Muted : Warning);
                         row.Cells[5].Style.SelectionForeColor = row.Cells[5].Style.ForeColor; row.Cells[5].ToolTipText = p.message ?? "";
                         row.Cells[6].ToolTipText = "更新：" + LocalDate(p.updatedAt, true) + "\r\n最近成功：" + LocalDate(p.lastSuccessAt, true);
                         if (p.current) row.Cells[0].Style.ForeColor = Teal;
-                        if (p.status == "ok") good++; else if (p.status != "pending" && p.status != "disabled") needsAttention++;
+                        if (p.status == "ok" && !MissingAccountBalance(p)) good++; else if (p.status != "pending" && p.status != "disabled") needsAttention++;
                         if (String.Equals(p.id, preserveId, StringComparison.Ordinal)) selectedIndex = index; HandleLowBalance(p);
                     }
                 _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders;
@@ -290,14 +305,45 @@ namespace RelayBalanceDesktop
                     _selectedId = (string)_grid.Rows[selectedIndex].Tag;
                 }
                 else _selectedId = null;
+                _emptyLabel.Text = _hiddenProviders.Count > 0 ? "列表中暂时没有监控项\r\n点击右上“已移出”可恢复配置，继续监控。" : "尚未发现可查询的中转站配置\r\n请先在 CC Switch 中添加 API 配置，再点击立即刷新。";
                 _emptyLabel.Visible = _grid.Rows.Count == 0; if (_emptyLabel.Visible) _emptyLabel.BringToFront();
-                _summaryLabel.Text = "已发现 " + _providers.Count.ToString(CultureInfo.InvariantCulture) + " 个配置    ·    " + good.ToString(CultureInfo.InvariantCulture) + " 个已更新" + (needsAttention > 0 ? "    ·    " + needsAttention.ToString(CultureInfo.InvariantCulture) + " 个需关注" : "") + "    ·    ● 当前使用";
+                _summaryLabel.Text = "正在监控 " + _providers.Count.ToString(CultureInfo.InvariantCulture) + " 个配置    ·    " + good.ToString(CultureInfo.InvariantCulture) + " 个已更新" + (needsAttention > 0 ? "    ·    " + needsAttention.ToString(CultureInfo.InvariantCulture) + " 个需关注" : "") + "    ·    ● 当前使用";
                 List<string> removed = new List<string>(); foreach (string id in _lastLow.Keys) if (!_providers.ContainsKey(id)) removed.Add(id); foreach (string id in removed) _lastLow.Remove(id);
             }
             finally { _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders; _grid.ResumeLayout(); _updatingGrid = false; }
+            string visibilityMessage = null; List<string> completedVisibility = new List<string>();
+            HashSet<string> hiddenIds = new HashSet<string>(StringComparer.Ordinal); foreach (HiddenProviderSnapshot hidden in _hiddenProviders) hiddenIds.Add(hidden.id);
+            foreach (KeyValuePair<string, bool> pending in _pendingVisibility)
+                if (pending.Value ? hiddenIds.Contains(pending.Key) : _providers.ContainsKey(pending.Key))
+                {
+                    completedVisibility.Add(pending.Key);
+                    visibilityMessage = pending.Value ? "已移出列表并停止监控。可从右上“已移出”恢复；CC Switch 配置未改变。" : "已恢复到列表，继续监控。";
+                }
+            foreach (string id in completedVisibility) _pendingVisibility.Remove(id);
             ShowSelection();
+            if (_hiddenDialog != null && !_hiddenDialog.IsDisposed) _hiddenDialog.UpdateProviders(_hiddenProviders, _pendingVisibility);
             _checkedLabel.Text = "最近查询：" + LocalDate(data.checkedAt, true) + "    ·    " + IntervalText(data.intervalSeconds) + "自动刷新    ·    配置变更自动检测";
             if (!SettingsDirty && !_waitingForSettings) SetMessage(!String.IsNullOrWhiteSpace(data.message) ? data.message : (data.refreshing ? "正在查询配置的中转站，请稍候…" : "余额已更新，配置变化会自动检测。"), String.IsNullOrWhiteSpace(data.message) ? Muted : Warning);
+            if (visibilityMessage != null) SetMessage(visibilityMessage + (SettingsDirty ? " 未保存的设置已保留。" : ""), Teal);
+        }
+        private void SetProviderVisibility(string id, bool hidden)
+        {
+            if (_preview || _stopped || _pendingVisibility.ContainsKey(id)) return;
+            if (hidden && !_providers.ContainsKey(id)) return;
+            _pendingVisibility[id] = hidden; ShowSelection();
+            if (_hiddenDialog != null && !_hiddenDialog.IsDisposed) _hiddenDialog.UpdateProviders(_hiddenProviders, _pendingVisibility);
+            SetMessage(hidden ? "正在移出列表；此操作不修改 CC Switch，可随时恢复。" : "正在恢复到列表…", Muted);
+            try { _client.SetProviderHidden(id, hidden); } catch { OnErrorReceived("列表更新失败，请重试。"); }
+        }
+        private void ShowHiddenProviders()
+        {
+            if (_hiddenDialog != null && !_hiddenDialog.IsDisposed) { _hiddenDialog.Activate(); return; }
+            using (HiddenProvidersDialog dialog = new HiddenProvidersDialog(delegate(string id) { SetProviderVisibility(id, false); }))
+            {
+                _hiddenDialog = dialog;
+                try { dialog.UpdateProviders(_hiddenProviders, _pendingVisibility); dialog.ShowDialog(this); }
+                finally { _hiddenDialog = null; }
+            }
         }
         private void MergeSettings(Snapshot data)
         {
@@ -326,13 +372,13 @@ namespace RelayBalanceDesktop
             ProviderSnapshot p;
             if (_selectedId == null || !_providers.TryGetValue(_selectedId, out p))
             {
-                _selectedId = null; _selectedTitle.Text = "选择配置，查看详情和设置"; _threshold.Enabled = false; _adapterButton.Enabled = false;
+                _selectedId = null; _selectedTitle.Text = "选择配置，查看详情和设置"; _threshold.Enabled = false; _adapterButton.Enabled = false; _hideButton.Enabled = false;
                 _thresholdUnit.Text = ""; _selectedAdapter.Text = "查询适配：自动检测"; _retryDetectionButton.Visible = false; _adapterButton.Text = "手动配置…";
                 _details.Text = "先在 CC Switch 中添加带有 API 地址的配置。无法自动识别的站点可按站点文档设置查询适配。"; return;
             }
             _selectedTitle.Text = p.name + "  /  " + AppLabel(p.app) + (p.current ? "  ·  当前使用" : ""); _tips.SetToolTip(_selectedTitle, _selectedTitle.Text + "\r\n" + p.origin);
             _updatingSettings = true; try { double value; if (_thresholds.TryGetValue(p.id, out value)) SetNumericValue(_threshold, value); } finally { _updatingSettings = false; }
-            _threshold.Enabled = !_waitingForSettings; _adapterButton.Enabled = !_waitingForSettings; _thresholdUnit.Text = UnitLabel(p.unit);
+            _threshold.Enabled = !_waitingForSettings; _adapterButton.Enabled = !_waitingForSettings; _thresholdUnit.Text = UnitLabel(p.unit); _hideButton.Enabled = !_pendingVisibility.ContainsKey(p.id);
             _tips.SetToolTip(_threshold, "余额小于或等于此值时提醒。支持 USD、CNY、EUR、GBP、JPY、HKD；原始额度暂不触发金额提醒。设为 0 可停用正余额提醒。");
             AdapterConfig config; _adapters.TryGetValue(p.id, out config);
             _selectedAdapter.Text = "查询适配：" + AdapterName(config == null ? "auto" : config.type) + (_editedAdapters.Contains(p.id) ? "（待保存）" : ""); _tips.SetToolTip(_selectedAdapter, _selectedAdapter.Text);
@@ -350,6 +396,11 @@ namespace RelayBalanceDesktop
                 + "\r\n已暂停定时适配；配置更改后会自动重新检测。"
                 + "\r\n" + (_editedAdapters.Contains(p.id) ? "适配方式已修改，请先保存设置。" : "最近查询：" + LocalDate(p.updatedAt, true));
             else if(retryable) _details.Text = "可点击“适配”重试所选站点，或使用“手动配置…”。已有手动配置会保留。\r\n" + _details.Text;
+            if (MissingAccountBalance(p))
+                _details.Text = "API Key未设限额，不代表账户资金无限；当前Key未返回账户余额。"
+                    + "\r\n读取账户余额需要有效的账户查询凭据；普通 API Key 可能无此权限。"
+                    + "\r\n今日实际用量：" + OptionalAmount(p.todayUsage, p.unit) + "    累计实际用量：" + OptionalAmount(p.totalUsage, p.unit)
+                    + "\r\n最近查询：" + LocalDate(p.updatedAt, true);
             _tips.SetToolTip(_details, _details.Text);
         }
         private void RetryDetection()
@@ -410,6 +461,8 @@ namespace RelayBalanceDesktop
         {
             RunOnUi(delegate { _refreshing = false; _refreshButton.Enabled = true; _refreshButton.Text = "立即刷新";
                 if (_waitingForSettings) { _waitingForSettings = false; SetSettingsEnabled(true); _saveButton.Text = "保存设置"; }
+                bool visibilityFailed = _pendingVisibility.Count > 0; _pendingVisibility.Clear();
+                if (_hiddenDialog != null && !_hiddenDialog.IsDisposed) { _hiddenDialog.UpdateProviders(_hiddenProviders, _pendingVisibility); if (visibilityFailed) _hiddenDialog.ShowError("恢复未完成，请重新尝试。"); }
                 ShowSelection(); SetMessage(String.IsNullOrWhiteSpace(message) ? "操作未完成，请稍后重试。" : message, Warning); });
         }
         private void SetMessage(string message, Color color) { _messageLabel.Text = message; _messageLabel.ForeColor = color; _tips.SetToolTip(_messageLabel, message); }
@@ -431,7 +484,9 @@ namespace RelayBalanceDesktop
         private static string UnitLabel(string unit) { return String.IsNullOrWhiteSpace(unit) ? "单位待确认" : unit.Trim(); }
         private static string Amount(double value, string unit) { return Money(value) + (String.IsNullOrWhiteSpace(unit) ? "" : " " + unit.Trim()); }
         private static string OptionalAmount(double? value, string unit) { return value.HasValue ? Amount(value.Value, unit) : "未提供"; }
-        private static string BalanceText(ProviderSnapshot p) { return p.unlimited ? "不限额" : (p.remaining.HasValue ? Amount(p.remaining.Value, p.unit) : "—"); }
+        private static bool HasReportedAccountBalance(ProviderSnapshot p) { return p.remaining.HasValue && ((!String.IsNullOrEmpty(p.balanceKindLabel) && p.balanceKindLabel.Contains("账户")) || p.adapter == "newapi-account" || p.adapter == "openrouter" || p.adapter == "deepseek" || (p.adapterConfig != null && p.adapterConfig.type == "custom" && p.adapterConfig.balanceKind == "account")); }
+        private static bool MissingAccountBalance(ProviderSnapshot p) { return p.unlimited && p.adapter == "newapi-token" && !HasReportedAccountBalance(p); }
+        private static string BalanceText(ProviderSnapshot p) { return MissingAccountBalance(p) ? "未获取账户余额" : (p.remaining.HasValue ? Amount(p.remaining.Value, p.unit) : (p.unlimited ? "不限额" : "—")); }
         private static string AppLabel(string value)
         {
             switch ((value ?? "").ToLowerInvariant()) { case "codex": return "Codex"; case "claude": return "Claude"; case "gemini": return "Gemini"; default: return String.IsNullOrEmpty(value) ? "应用未标注" : value; }
@@ -440,7 +495,7 @@ namespace RelayBalanceDesktop
         {
             switch (p.status)
             {
-                case "ok": return p.lowBalance && !p.unlimited ? "达到提醒阈值" : "已更新";
+                case "ok": return MissingAccountBalance(p) ? "余额未获取" : (p.lowBalance && !p.unlimited ? "达到提醒阈值" : "已更新");
                 case "stale": return "查询失败 · 旧余额"; case "pending": return "等待查询"; case "unsupported": return "适配失败";
                 case "missing": return "配置不完整"; case "disabled": return "已停用"; default: return "查询失败";
             }
@@ -468,6 +523,75 @@ namespace RelayBalanceDesktop
         {
             public BorderPanel() { SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
             protected override void OnPaint(PaintEventArgs e) { base.OnPaint(e); using (Pen pen = new Pen(Color.FromArgb(221, 229, 236))) e.Graphics.DrawRectangle(pen, 0, 0, Math.Max(0, Width - 1), Math.Max(0, Height - 1)); }
+        }
+        private sealed class HiddenProvidersDialog : Form
+        {
+            private readonly Action<string> _restore;
+            private readonly DataGridView _grid;
+            private readonly Button _restoreButton;
+            private readonly Label _status, _empty;
+            private readonly HashSet<string> _restoring = new HashSet<string>(StringComparer.Ordinal);
+            private bool _updating;
+            public HiddenProvidersDialog(Action<string> restore)
+            {
+                SuspendLayout(); _restore = restore; Text = "已移出的配置"; Icon = Program.AppIcon; ShowInTaskbar = false;
+                StartPosition = FormStartPosition.CenterParent; Font = new Font("Microsoft YaHei UI", 9F); BackColor = Color.FromArgb(244, 247, 250); ForeColor = Ink;
+                AutoScaleMode = AutoScaleMode.None; ClientSize = new Size(760, 500); MinimumSize = new Size(680, 420); MinimizeBox = false; MaximizeBox = false;
+                TableLayoutPanel layout = new TableLayoutPanel(); layout.Dock = DockStyle.Fill; layout.Padding = new Padding(20); layout.ColumnCount = 1; layout.RowCount = 3;
+                layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64F)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54F)); Controls.Add(layout);
+                Label help = LabelAt("这些配置已停止在本软件中监控，CC Switch 配置未改变。\r\n选择配置并恢复后，会重新加入列表并查询余额。", 0, 0, 720, 58, 9.5F, FontStyle.Regular, Muted); help.Dock = DockStyle.Fill; help.Margin = Padding.Empty; help.AutoEllipsis = false; layout.Controls.Add(help, 0, 0);
+                BorderPanel list = new BorderPanel(); list.Dock = DockStyle.Fill; list.Padding = new Padding(1); list.Margin = new Padding(0, 0, 0, 6); layout.Controls.Add(list, 0, 1);
+                _grid = new BufferedGrid(); _grid.Dock = DockStyle.Fill; _grid.BackgroundColor = Color.White; _grid.BorderStyle = BorderStyle.None; _grid.RowHeadersVisible = false; _grid.ReadOnly = true;
+                _grid.AllowUserToAddRows = false; _grid.AllowUserToDeleteRows = false; _grid.AllowUserToResizeRows = false; _grid.MultiSelect = false; _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+                _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders; _grid.EnableHeadersVisualStyles = false;
+                _grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal; _grid.GridColor = Color.FromArgb(235, 240, 243); _grid.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+                _grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(226, 245, 240); _grid.DefaultCellStyle.SelectionForeColor = Ink;
+                _grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(234, 241, 245); _grid.ColumnHeadersDefaultCellStyle.ForeColor = Ink; _grid.ColumnHeadersDefaultCellStyle.Font = new Font(Font, FontStyle.Bold);
+                _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
+                foreach (string heading in new string[] { "配置名称", "应用", "中转站地址" }) { DataGridViewTextBoxColumn column = new DataGridViewTextBoxColumn(); column.HeaderText = heading; column.SortMode = DataGridViewColumnSortMode.NotSortable; column.FillWeight = heading == "应用" ? 20 : 40; column.MinimumWidth = 70; _grid.Columns.Add(column); }
+                _grid.SelectionChanged += delegate { if (!_updating) UpdateSelection(); }; list.Controls.Add(_grid);
+                _empty = LabelAt("暂无已移出的配置", 0, 0, 600, 80, 11F, FontStyle.Regular, Muted); _empty.Dock = DockStyle.Fill; _empty.TextAlign = ContentAlignment.MiddleCenter; _empty.Visible = false; list.Controls.Add(_empty);
+                TableLayoutPanel actions = new TableLayoutPanel(); actions.Dock = DockStyle.Fill; actions.Margin = Padding.Empty; actions.ColumnCount = 3; actions.RowCount = 1;
+                actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 156F)); actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112F)); actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); layout.Controls.Add(actions, 0, 2);
+                _status = LabelAt("", 0, 0, 390, 40, 9F, FontStyle.Regular, Muted); _status.Dock = DockStyle.Fill; _status.Margin = Padding.Empty; actions.Controls.Add(_status, 0, 0);
+                _restoreButton = ActionButton("恢复到列表", 0, 0, 144, 36); _restoreButton.Dock = DockStyle.Fill; _restoreButton.Margin = new Padding(6, 10, 6, 8); _restoreButton.Enabled = false;
+                _restoreButton.Click += delegate { if (_grid.SelectedRows.Count > 0) { string id = _grid.SelectedRows[0].Tag as string; if (id != null && !_restoring.Contains(id)) _restore(id); } }; actions.Controls.Add(_restoreButton, 1, 0);
+                Button close = SecondaryButton("关闭", 0, 0, 100, 36); close.Dock = DockStyle.Fill; close.Margin = new Padding(6, 10, 0, 8); close.DialogResult = DialogResult.Cancel; actions.Controls.Add(close, 2, 0); CancelButton = close;
+                AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96); ResumeLayout(true); PerformAutoScale();
+                float scale; using (Graphics graphics = CreateGraphics()) scale = graphics.DpiY / 96F;
+                _grid.RowTemplate.MinimumHeight = (int)Math.Ceiling(60F * scale); _grid.RowTemplate.Height = _grid.RowTemplate.MinimumHeight; _grid.ColumnHeadersHeight = (int)Math.Ceiling(38F * scale);
+                _grid.DefaultCellStyle.Padding = new Padding((int)(10 * scale), (int)(10 * scale), (int)(6 * scale), (int)(10 * scale));
+                _grid.ColumnHeadersDefaultCellStyle.Padding = new Padding((int)(10 * scale), 0, 0, 0);
+                foreach (DataGridViewColumn column in _grid.Columns) column.MinimumWidth = (int)Math.Ceiling(column.MinimumWidth * scale);
+                Rectangle area = Screen.FromControl(this).WorkingArea; Size bounded = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height)); MinimumSize = new Size(Math.Min(MinimumSize.Width, bounded.Width), Math.Min(MinimumSize.Height, bounded.Height)); Size = bounded;
+            }
+            public void UpdateProviders(IList<HiddenProviderSnapshot> providers, IDictionary<string, bool> pending)
+            {
+                string selected = _grid.SelectedRows.Count == 0 ? null : _grid.SelectedRows[0].Tag as string; _restoring.Clear();
+                foreach (KeyValuePair<string, bool> item in pending) if (!item.Value) _restoring.Add(item.Key);
+                _updating = true; _grid.SuspendLayout(); _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
+                try
+                {
+                    _grid.Rows.Clear(); int selectedIndex = 0;
+                    foreach (HiddenProviderSnapshot provider in providers)
+                    {
+                        int index = _grid.Rows.Add(provider.name, AppLabel(provider.app), provider.origin); _grid.Rows[index].Tag = provider.id;
+                        if (provider.id == selected) selectedIndex = index;
+                    }
+                    _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders;
+                    if (_grid.Rows.Count > 0) { _grid.CurrentCell = _grid.Rows[selectedIndex].Cells[0]; _grid.Rows[selectedIndex].Selected = true; }
+                    _empty.Visible = _grid.Rows.Count == 0; if (_empty.Visible) _empty.BringToFront();
+                    _status.Text = "已移出 " + providers.Count.ToString(CultureInfo.InvariantCulture) + " 个配置"; _status.ForeColor = Muted;
+                }
+                finally { _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders; _grid.ResumeLayout(); _updating = false; }
+                UpdateSelection();
+            }
+            public void ShowError(string message) { _status.Text = message; _status.ForeColor = Warning; }
+            private void UpdateSelection()
+            {
+                string id = _grid.SelectedRows.Count == 0 ? null : _grid.SelectedRows[0].Tag as string; bool waiting = id != null && _restoring.Contains(id);
+                _restoreButton.Enabled = id != null && !waiting; _restoreButton.Text = waiting ? "正在恢复…" : "恢复到列表";
+            }
         }
         private sealed class AdapterDialog : Form
         {

@@ -10,7 +10,7 @@ namespace RelayBalanceDesktop
     {
         public static string Prepare()
         {
-            string directory = Path.Combine(Program.DataDirectory, "runtime", "1.1.2-" + RuntimeManifest.PayloadId);
+            string directory = Path.Combine(Program.DataDirectory, "runtime", "1.1.3-" + RuntimeManifest.PayloadId);
             Directory.CreateDirectory(directory);
             Extract(directory, "node.exe", "Payload.Node", RuntimeManifest.NodeHash, true);
             Extract(directory, "core.mjs", "Payload.Core", RuntimeManifest.CoreHash, false);

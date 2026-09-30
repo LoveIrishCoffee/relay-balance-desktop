@@ -6,7 +6,7 @@ import path from 'node:path';
 
 export const runtimeDir = process.env.RELAY_BALANCE_STATE_DIR || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'RelayBalanceDesktop', 'state');
 export const dbPath = process.env.CC_SWITCH_DB || path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
-export const DEFAULT_SETTINGS = Object.freeze({ intervalSeconds: 300, thresholds: Object.freeze({}), adapters: Object.freeze({}) });
+export const DEFAULT_SETTINGS = Object.freeze({ intervalSeconds: 300, thresholds: Object.freeze({}), adapters: Object.freeze({}), hiddenProviders: Object.freeze([]) });
 export const finite = value => (typeof value === 'number' || typeof value === 'string' && value.trim() !== '') && Number.isFinite(Number(value)) ? Number(value) : null;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -38,7 +38,7 @@ export function validateAdapter(input) {
   return { type: 'custom', path: input.path, remainingPath: input.remainingPath, unit: input.unit, divisor, balanceKind };
 }
 export function validateSettings(input) {
-  if (!object(input) || Object.keys(input).some(k => !['intervalSeconds', 'thresholds', 'adapters'].includes(k))) throw new Error('设置格式错误');
+  if (!object(input) || Object.keys(input).some(k => !['intervalSeconds', 'thresholds', 'adapters', 'hiddenProviders'].includes(k))) throw new Error('设置格式错误');
   const intervalSeconds = input.intervalSeconds ?? 300;
   if (!Number.isInteger(intervalSeconds) || intervalSeconds < 60 || intervalSeconds > 86400) throw new Error('刷新间隔须为 60–86400 秒');
   const thresholds = {}, adapters = {};
@@ -54,7 +54,9 @@ export function validateSettings(input) {
       }
     }
   }
-  return { intervalSeconds, thresholds, adapters };
+  const hidden = input.hiddenProviders ?? [];
+  if (!Array.isArray(hidden) || hidden.length > 10000 || hidden.some(id => typeof id !== 'string' || !idPattern.test(id))) throw new Error('已移出配置列表无效');
+  return { intervalSeconds, thresholds, adapters, hiddenProviders: [...new Set(hidden)] };
 }
 export async function loadSettings() {
   try {
@@ -67,7 +69,7 @@ export async function loadSettings() {
         const old = credential.origin ? oldHosts[new URL(credential.origin).hostname] : null;
         if (old && Object.hasOwn(saved.thresholds, old)) thresholds[credential.id] ??= saved.thresholds[old];
       }
-      return validateSettings({ intervalSeconds: saved.intervalSeconds, thresholds, adapters: saved.adapters || {} });
+      return validateSettings({ intervalSeconds: saved.intervalSeconds, thresholds, adapters: saved.adapters || {}, hiddenProviders: saved.hiddenProviders || [] });
     }
     return validateSettings(saved);
   }
@@ -225,8 +227,8 @@ export function parseNewApi(raw, statusRaw, { account = false } = {}) {
   const remaining = unlimited ? null : amount * factor;
   if (remaining !== null && !Number.isFinite(remaining)) schema();
   return { remaining, unit, unlimited, todayUsage: null, totalUsage: used === null || !Number.isFinite(used * factor) ? null : used * factor,
-    balanceKindLabel: account ? '账户余额' : 'API Key 剩余额度',
-    message: unlimited ? '此 Key 未设限额，不代表账户资金无限' : unit === 'quota' ? '站点未提供可靠货币换算，显示原始额度' : account ? '账户接口返回，按站点公布的比例换算' : 'Key 剩余额度，按站点公布的比例换算；不等于账户余额' };
+    balanceKindLabel: account ? '账户余额' : unlimited ? 'API Key 限额（非余额）' : 'API Key 剩余额度',
+    message: unlimited ? '此 API Key 未设限额，不代表账户资金无限；当前查询未获取账户余额，账户余额仍可能不足' : unit === 'quota' ? '站点未提供可靠货币换算，显示原始额度' : account ? '账户接口返回，按站点公布的比例换算' : 'Key 剩余额度，按站点公布的比例换算；不等于账户余额' };
 }
 export function parseOpenRouter(raw) {
   active(raw); const credits = finite(raw.data?.total_credits), used = finite(raw.data?.total_usage);
@@ -254,15 +256,18 @@ function routes(credential) {
   const prefix = base.replace(/\/(?:v1|v1beta)$/, '');
   return { usage: prefix + '/v1/usage', token: prefix + '/api/usage/token/', status: prefix + '/api/status', account: prefix + '/api/user/self' };
 }
-async function queryWith(credential, adapter, fetchImpl) {
-  const route = routes(credential), get = (url, auth = 'key') => requestJson(credential, url, { fetchImpl, auth });
+async function queryWith(credential, adapter, fetchImpl, isActive) {
+  const route = routes(credential), get = (url, auth = 'key') => {
+    if (!isActive()) throw new QueryError('cancelled', '配置已移出或更改，停止后续查询');
+    return requestJson(credential, url, { fetchImpl, auth });
+  };
   let result;
   if (adapter.type === 'sub2api') result = parseUsage(await get(route.usage));
   else if (adapter.type === 'newapi-token' || adapter.type === 'newapi-account') {
     const account = adapter.type === 'newapi-account';
     const raw = await get(account ? route.account : route.token, account ? 'account' : 'key');
     // Conversion discovery is public and optional. Unknown ratios must stay raw.
-    let status = null; try { status = await get(route.status, 'none'); } catch (error) { if (error.code === 'rate_limit') throw error; }
+    let status = null; try { status = await get(route.status, 'none'); } catch (error) { if (error.code === 'rate_limit' || error.code === 'cancelled') throw error; }
     result = parseNewApi(raw, status, { account });
   } else if (adapter.type === 'openrouter') result = parseOpenRouter(await get('/api/v1/credits'));
   else if (adapter.type === 'deepseek') result = parseDeepSeek(await get('/user/balance'));
@@ -270,14 +275,14 @@ async function queryWith(credential, adapter, fetchImpl) {
   else throw new QueryError('unsupported', '未选择可识别的查询方式');
   return { ...result, adapter: adapter.type, adapterLabel: labels[adapter.type] };
 }
-export async function queryProvider(credential, input = { type: 'auto' }, fetchImpl = fetch) {
+export async function queryProvider(credential, input = { type: 'auto' }, fetchImpl = fetch, isActive = () => true) {
   const adapter = validateAdapter(input);
-  if (adapter.type !== 'auto') return queryWith(credential, adapter, fetchImpl);
+  if (adapter.type !== 'auto') return queryWith(credential, adapter, fetchImpl, isActive);
   const hostname = new URL(credential.origin).hostname;
   const candidates = hostname === 'openrouter.ai' ? ['openrouter'] : hostname === 'api.deepseek.com' ? ['deepseek'] : [...(credential.metaUsage ? ['newapi-account'] : []), 'sub2api', 'newapi-token'];
   let authError;
   for (const type of candidates) {
-    try { return await queryWith(credential, { type }, fetchImpl); }
+    try { return await queryWith(credential, { type }, fetchImpl, isActive); }
     catch (error) {
       if (error.code === 'invalid_key' || error.code === 'inactive') authError = error;
       else if (!['endpoint_missing', 'schema_error', 'not_json', 'account_auth'].includes(error.code)) throw error;
@@ -293,10 +298,20 @@ export class Monitor {
     this.entries = new Map(); this.checkedAt = null; this.message = ''; this.inflight = null; this.pendingChanges = false;
   }
   snapshot() {
-    return { providers: [...this.entries.values()].map(({ state }) => {
+    const hidden = new Set(this.settings.hiddenProviders);
+    const entries = [...this.entries.values()];
+    return { providers: entries.filter(({ state }) => !hidden.has(state.id)).map(({ state }) => {
       const threshold = this.settings.thresholds[state.id] ?? 5;
       return { ...state, threshold, adapterConfig: this.settings.adapters[state.id] || { type: 'auto' }, lowBalance: state.status === 'ok' && !state.unlimited && state.remaining !== null && ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'HKD'].includes(state.unit) && state.remaining <= threshold };
-    }), checkedAt: this.checkedAt, intervalSeconds: this.settings.intervalSeconds, refreshing: !!this.inflight, message: this.message };
+    }), hiddenProviders: entries.filter(({ state }) => hidden.has(state.id)).map(({ state: { id, name, app, origin } }) => ({ id, name, app, origin })),
+      checkedAt: this.checkedAt, intervalSeconds: this.settings.intervalSeconds, refreshing: !!this.inflight, message: this.message };
+  }
+  settingsWithVisibility(id, hidden) {
+    if (typeof id !== 'string' || !idPattern.test(id) || typeof hidden !== 'boolean') throw new QueryError('invalid_visibility', '移出或恢复的配置无效');
+    if (!this.reconcile() || !this.entries.has(id)) throw new QueryError('invalid_visibility', '配置已不在 CC Switch 中，请刷新列表');
+    const ids = new Set(this.settings.hiddenProviders);
+    if (hidden) ids.add(id); else ids.delete(id);
+    return validateSettings({ ...this.settings, hiddenProviders: [...ids] });
   }
   reconcile() {
     let credentials;
@@ -307,15 +322,23 @@ export class Monitor {
       return false;
     }
     const next = new Map();
+    const hiddenIds = new Set(this.settings.hiddenProviders);
     for (const credential of credentials) {
       const adapter = this.settings.adapters[credential.id] || { type: 'auto' };
+      const hidden = hiddenIds.has(credential.id);
       const signature = credential.fingerprint + JSON.stringify(adapter);
       let entry = this.entries.get(credential.id);
       if (!entry || entry.signature !== signature) {
-        entry = { credential, adapter, signature, lastAttempt: 0, retryAt: 0, autoAdapter: null, needsQuery: true, paused: false,
+        entry = { credential, adapter, signature, hidden, lastAttempt: 0, retryAt: 0, autoAdapter: null, needsQuery: !hidden, paused: false,
           state: { id: credential.id, name: credential.name, app: credential.app, origin: credential.origin, current: credential.current,
             status: credential.blockedReason ? 'missing' : 'pending', message: credential.blockedReason || '正在识别余额接口', remaining: null, todayUsage: null, totalUsage: null, unlimited: false, unit: '', balanceKindLabel: '', adapter: adapter.type, adapterLabel: labels[adapter.type], updatedAt: null, lastSuccessAt: null } };
       } else { entry.credential = credential; Object.assign(entry.state, { name: credential.name, current: credential.current, app: credential.app }); }
+      if (entry.hidden !== hidden) {
+        // Replace the entry so a response started before removal cannot update a restored row.
+        // Retain Retry-After and click throttling across a hide/restore cycle.
+        entry = { ...entry, hidden, needsQuery: !hidden, paused: false, autoAdapter: null, lastAttempt: 0,
+          state: { ...entry.state, status: credential.blockedReason ? 'missing' : 'pending', message: credential.blockedReason || '恢复后重新查询余额' } };
+      }
       next.set(credential.id, entry);
     }
     this.entries = next; this.message = next.size ? '' : 'CC Switch 中尚未发现配置了 API 的中转站';
@@ -326,7 +349,7 @@ export class Monitor {
     if (!idPattern.test(id)) throw new QueryError('invalid_id', '配置标识无效');
     if (!this.reconcile()) return this.snapshot();
     const entry = this.entries.get(id);
-    if (!entry || !['unsupported','error','stale'].includes(entry.state.status) || entry.credential.blockedReason) throw new QueryError('invalid_detection', '仅适配或查询失败的配置可以重试');
+    if (!entry || entry.hidden || !['unsupported','error','stale'].includes(entry.state.status) || entry.credential.blockedReason) throw new QueryError('invalid_detection', '仅适配或查询失败的配置可以重试');
     if (entry.retryAt > Date.now()) throw new QueryError('rate_limit', '站点要求等待，限流结束后才能重试');
     if (Date.now() - (entry.lastManualDetection || 0) < 10000) throw new QueryError('retry_soon', '请等待 10 秒后再继续识别');
     entry.lastManualDetection = Date.now();
@@ -337,11 +360,11 @@ export class Monitor {
   async refresh({ force = false, changedOnly = false } = {}) {
     const valid = this.reconcile();
     if (this.inflight) {
-      if (valid && [...this.entries.values()].some(e => e.needsQuery)) this.pendingChanges = true;
+      if (valid && [...this.entries.values()].some(e => !e.hidden && e.needsQuery)) this.pendingChanges = true;
       await this.inflight; return this.snapshot();
     }
     if (!valid) return this.snapshot();
-    const candidates = [...this.entries.values()].filter(e => !e.paused && !e.credential.blockedReason && Date.now() >= e.retryAt && (e.needsQuery || !changedOnly && (force || Date.now() - e.lastAttempt >= 10000)));
+    const candidates = [...this.entries.values()].filter(e => !e.hidden && !e.paused && !e.credential.blockedReason && Date.now() >= e.retryAt && (e.needsQuery || !changedOnly && (force || Date.now() - e.lastAttempt >= 10000)));
     if (!candidates.length) return this.snapshot();
     this.inflight = this.perform(candidates);
     try { await this.inflight; } finally { this.inflight = null; }
@@ -355,13 +378,14 @@ export class Monitor {
         const index = queue.findIndex(e => !origins.has(e.credential.origin));
         if (index < 0) return;
         const entry = queue.splice(index, 1)[0];
-        if (this.entries.get(entry.state.id) !== entry) continue;
+        if (this.entries.get(entry.state.id) !== entry || entry.hidden || this.settings.hiddenProviders.includes(entry.state.id)) continue;
+        const isActive = () => this.entries.get(entry.state.id) === entry && !entry.hidden && !this.settings.hiddenProviders.includes(entry.state.id);
         origins.add(entry.credential.origin); entry.lastAttempt = Date.now(); entry.needsQuery = false;
         try {
           let result;
-          try { result = await this.queryFn(entry.credential, entry.autoAdapter || entry.adapter); }
+          try { result = await this.queryFn(entry.credential, entry.autoAdapter || entry.adapter, undefined, isActive); }
           catch (error) {
-            if (entry.autoAdapter && ['endpoint_missing', 'schema_error', 'not_json', 'unsupported'].includes(error.code)) { entry.autoAdapter = null; result = await this.queryFn(entry.credential, entry.adapter); }
+            if (isActive() && entry.autoAdapter && ['endpoint_missing', 'schema_error', 'not_json', 'unsupported'].includes(error.code)) { entry.autoAdapter = null; result = await this.queryFn(entry.credential, entry.adapter, undefined, isActive); }
             else throw error;
           }
           if (this.entries.get(entry.state.id) === entry) {
@@ -370,8 +394,12 @@ export class Monitor {
             Object.assign(entry.state, result, { status: 'ok', updatedAt: now, lastSuccessAt: now }); entry.retryAt = 0;
           }
         } catch (error) {
+          const current = this.entries.get(entry.state.id);
+          // A cancelled result cannot restore money, but its server's wait deadline still applies.
+          if (error.retryAfterSeconds && current?.credential.fingerprint === entry.credential.fingerprint) {
+            current.retryAt = Math.max(current.retryAt, Date.now() + error.retryAfterSeconds * 1000);
+          }
           if (this.entries.get(entry.state.id) === entry) {
-            if (error.retryAfterSeconds) entry.retryAt = Date.now() + error.retryAfterSeconds * 1000;
             entry.paused = error.code === 'unsupported';
             if (entry.paused) Object.assign(entry.state, { remaining: null, todayUsage: null, totalUsage: null, unlimited: false, unit: '', balanceKindLabel: '', lastSuccessAt: null });
             Object.assign(entry.state, { status: entry.paused ? 'unsupported' : entry.state.lastSuccessAt ? 'stale' : 'error', updatedAt: new Date().toISOString(), message: error instanceof QueryError ? error.message : '查询失败，稍后自动重试' });

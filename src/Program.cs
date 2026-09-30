@@ -15,8 +15,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("自动发现 CC Switch 配置的本地 API 余额监控")]
 [assembly: AssemblyCompany("Relay Balance contributors")]
 [assembly: AssemblyProduct("Relay Balance Desktop")]
-[assembly: AssemblyVersion("1.1.2.0")]
-[assembly: AssemblyFileVersion("1.1.2.0")]
+[assembly: AssemblyVersion("1.1.3.0")]
+[assembly: AssemblyFileVersion("1.1.3.0")]
 
 namespace RelayBalanceDesktop
 {
@@ -69,12 +69,13 @@ namespace RelayBalanceDesktop
             return new Snapshot
             {
                 checkedAt = time, intervalSeconds = 300, refreshing = false,
+                hiddenProviders = new List<HiddenProviderSnapshot> { new HiddenProviderSnapshot { id="p-00000000000000000006", name="已移出的示例配置 · 可随时恢复", app="codex", origin="https://paused-relay.example" } },
                 providers = new List<ProviderSnapshot>
                 {
                     new ProviderSnapshot { id="p-00000000000000000001",name="示例中转 A · 高级套餐 · 团队共享账户",app="codex",origin="https://relay-a.example",status="ok",remaining=26.7500,unit="USD",todayUsage=1.2500,totalUsage=73.25,threshold=5,current=true,adapter="sub2api",adapterLabel="Sub2API",balanceKindLabel="账户钱包余额",message="示例数据；余额来自站点接口，用量为当前 API Key 实际花费",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000002",name="示例中转 B",app="claude",origin="https://relay-b.example",status="ok",remaining=118.4000,unit="CNY",totalUsage=482.10,threshold=5,adapter="newapi-token",adapterLabel="New API · Key 额度",balanceKindLabel="API Key 剩余额度",message="示例数据；按站点公布比例换算，非账户钱包",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000003",name="备用账户",app="codex",origin="https://relay-a.example",status="ok",remaining=4.6500,unit="USD",todayUsage=0,totalUsage=95.35,threshold=5,lowBalance=true,adapter="sub2api",adapterLabel="Sub2API",balanceKindLabel="账户钱包余额",message="示例数据；同站点不同配置分别显示",updatedAt=time,lastSuccessAt=time },
-                    new ProviderSnapshot { id="p-00000000000000000004",name="未设 Key 限额",app="gemini",origin="https://relay-c.example",status="ok",remaining=null,unit="quota",threshold=5,unlimited=true,adapter="newapi-token",adapterLabel="New API · Key 额度",balanceKindLabel="API Key 剩余额度",message="此 Key 未设限额，不代表账户资金无限",updatedAt=time,lastSuccessAt=time },
+                    new ProviderSnapshot { id="p-00000000000000000004",name="未获取账户余额的示例配置",app="gemini",origin="https://relay-c.example",status="ok",remaining=null,unit="quota",threshold=5,unlimited=true,adapter="newapi-token",adapterLabel="New API · Key 额度",balanceKindLabel="API Key 限额（非余额）",message="API Key未设限额，不代表账户资金无限；当前Key未返回账户余额",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000005",name="待适配站点",app="codex",origin="https://relay-d.example",status="unsupported",threshold=5,adapter="auto",adapterLabel="自动识别",message="适配失败，可点击“适配”重新尝试。手动配置可随时使用",updatedAt=time }
                 }
             };
@@ -87,7 +88,11 @@ namespace RelayBalanceDesktop
             {
                 form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-30000,-30000); form.ShowInTaskbar = false;
                 form.Show(); form.ApplySnapshot(DemoSnapshot()); Application.DoEvents();
+                AssertContentTitleRemoved(form);
                 SavePreview(form, Path.Combine(directory,"desktop-preview.png"));
+                DataGridView previewGrid=FormField<DataGridView>(form,"_grid"); previewGrid.CurrentCell=previewGrid.Rows[3].Cells[0];Application.DoEvents();
+                SavePreview(form,Path.Combine(directory,"account-unavailable-preview.png"));
+                CaptureHiddenPreview(form,Path.Combine(directory,"hidden-providers-preview.png"));
                 Snapshot failedFirst = DemoSnapshot();
                 ProviderSnapshot failed = failedFirst.providers[failedFirst.providers.Count - 1];
                 failedFirst.providers.RemoveAt(failedFirst.providers.Count - 1); failedFirst.providers.Insert(0,failed);
@@ -107,6 +112,30 @@ namespace RelayBalanceDesktop
         private static void SavePreview(Form form,string filename)
         {
             using(Bitmap image=new Bitmap(form.Width,form.Height)) { form.DrawToBitmap(image,new Rectangle(0,0,form.Width,form.Height));image.Save(filename,ImageFormat.Png); }
+        }
+        private static T FormField<T>(BalanceForm form,string name) { return (T)typeof(BalanceForm).GetField(name,BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form); }
+        private static void AssertContentTitleRemoved(Control parent)
+        {
+            foreach(Control child in parent.Controls) { if(child is Label && child.Text=="中转站余额")throw new Exception("large content title remains");AssertContentTitleRemoved(child); }
+        }
+        private static void CaptureHiddenPreview(BalanceForm form,string file)
+        {
+            bool captured=false;Exception failure=null;
+            using(System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer())
+            {
+                timer.Interval=100;timer.Tick+=delegate {
+                    foreach(Form window in Application.OpenForms)
+                        if(window.GetType().Name=="HiddenProvidersDialog")
+                        {
+                            timer.Stop();
+                            try { AssertActionReachable((Button)window.GetType().GetField("_restoreButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(window));SavePreview(window,file);captured=true; }
+                            catch(Exception ex){failure=ex;}
+                            window.Close();return;
+                        }
+                };
+                timer.Start();FormField<Button>(form,"_hiddenButton").PerformClick();timer.Stop();
+            }
+            if(failure!=null)throw failure;if(!captured)throw new Exception("hidden providers preview did not open");
         }
         // Visible=true alone does not prove that a user can see or click a button.
         private static void AssertActionReachable(Button button)
@@ -134,13 +163,14 @@ namespace RelayBalanceDesktop
                 Snapshot snapshot=DemoSnapshot();
                 ProviderSnapshot failed=snapshot.providers[snapshot.providers.Count-1];snapshot.providers.RemoveAt(snapshot.providers.Count-1);snapshot.providers.Insert(0,failed);
                 form.ApplySnapshot(snapshot);Application.DoEvents();
+                AssertContentTitleRemoved(form);
                 foreach(int width in new int[]{form.Width,form.Width-22,form.MinimumSize.Width})
                 {
                     form.Width=width;Application.DoEvents();
                     for(int round=0;round<3;round++)
                     {
                         grid.CurrentCell=grid.Rows[0].Cells[0];form.ApplySnapshot(snapshot);Application.DoEvents();
-                        AssertActionReachable(retry);AssertActionReachable(manual);
+                        AssertActionReachable(retry);AssertActionReachable(manual);AssertActionReachable(FormField<Button>(form,"_hideButton"));AssertActionReachable(FormField<Button>(form,"_hiddenButton"));
                         grid.CurrentCell=grid.Rows[1].Cells[0];Application.DoEvents();AssertActionReachable(manual);
                     }
                 }
@@ -183,6 +213,87 @@ namespace RelayBalanceDesktop
                 }
                 form.Close();
             }
+        }
+        private static void TestBalancePresentation()
+        {
+            using(BackendClient backend=new BackendClient())
+            using(BalanceForm form=new BalanceForm(backend,true))
+            {
+                form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-30000,-30000);form.ShowInTaskbar=false;form.Show();
+                Snapshot snapshot=DemoSnapshot();form.ApplySnapshot(snapshot);Application.DoEvents();AssertContentTitleRemoved(form);
+                DataGridView grid=FormField<DataGridView>(form,"_grid");
+                if((string)grid.Rows[3].Cells[2].Value!="未获取账户余额" || (string)grid.Rows[3].Cells[5].Value!="余额未获取")throw new Exception("unlimited key presented as account balance");
+                if(!FormField<Label>(form,"_summaryLabel").Text.Contains("2 个需关注"))throw new Exception("missing account balance not flagged");
+                grid.CurrentCell=grid.Rows[3].Cells[0];Application.DoEvents();
+                if(!FormField<Label>(form,"_details").Text.Contains("当前Key未返回账户余额"))throw new Exception("unlimited key explanation missing");
+                snapshot.providers[3].adapter="newapi-account";snapshot.providers[3].balanceKindLabel="账户余额";snapshot.providers[3].remaining=26.75;snapshot.providers[3].unit="USD";
+                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells[2].Value!="26.75 USD")throw new Exception("real account balance hidden");
+                snapshot.providers[3].adapter="sub2api";snapshot.providers[3].balanceKindLabel="订阅剩余额度";snapshot.providers[3].remaining=null;
+                form.ApplySnapshot(snapshot);Application.DoEvents();if((string)grid.Rows[3].Cells[2].Value!="不限额")throw new Exception("unlimited subscription changed");
+                snapshot.providers.Clear();form.ApplySnapshot(snapshot);Application.DoEvents();
+                AssertActionReachable(FormField<Button>(form,"_hiddenButton"));if(FormField<Button>(form,"_hideButton").Enabled)throw new Exception("empty list remove enabled");
+                snapshot.hiddenProviders.Clear();form.ApplySnapshot(snapshot);Application.DoEvents();AssertActionReachable(FormField<Button>(form,"_hiddenButton"));
+                form.Close();
+            }
+            Snapshot invalid=DemoSnapshot();invalid.hiddenProviders[0].id=invalid.providers[0].id;if(BackendClient.ValidSnapshot(invalid))throw new Exception("hidden duplicate accepted");
+            invalid=DemoSnapshot();invalid.hiddenProviders[0].id="invalid";if(BackendClient.ValidSnapshot(invalid))throw new Exception("hidden invalid id accepted");
+        }
+        private static void PumpUntil(Func<bool> condition,int timeout,string failure)
+        {
+            DateTime deadline=DateTime.UtcNow.AddMilliseconds(timeout);
+            while(!condition() && DateTime.UtcNow<deadline){Application.DoEvents();Thread.Sleep(15);}
+            Application.DoEvents();if(!condition())throw new Exception(failure);
+        }
+        private static void RunFixtureScript(string runtime,string script)
+        {
+            ProcessStartInfo info=new ProcessStartInfo(Path.Combine(runtime,"node.exe"),"-");info.UseShellExecute=false;info.CreateNoWindow=true;info.WindowStyle=ProcessWindowStyle.Hidden;
+            info.RedirectStandardInput=true;info.RedirectStandardOutput=true;info.RedirectStandardError=true;
+            using(Process process=Process.Start(info)) { process.StandardInput.Write(script);process.StandardInput.Close();if(!process.WaitForExit(15000)||process.ExitCode!=0)throw new Exception("visibility fixture script"); }
+        }
+        private static void TestVisibilityLifecycle(string runtime,string fixture)
+        {
+            string fixtureLiteral=new JavaScriptSerializer().Serialize(fixture);
+            RunFixtureScript(runtime,"const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync("+fixtureLiteral+");d.prepare('DELETE FROM providers WHERE id=?').run('desktop-visibility');d.prepare('INSERT INTO providers(id,name,app_type,settings_config,is_current,meta) VALUES(?,?,?,?,?,?)').run('desktop-visibility','可恢复的虚构配置','codex',JSON.stringify({base_url:'https://fixture.invalid'}),0,'{}');d.close();");
+            using(BackendClient backend=new BackendClient())
+            using(BalanceForm form=new BalanceForm(backend,false))
+            {
+                int settingsEvents=0;backend.SettingsSaved+=delegate{Interlocked.Increment(ref settingsEvents);};
+                form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-30000,-30000);form.ShowInTaskbar=false;form.Show();
+                DataGridView grid=FormField<DataGridView>(form,"_grid");PumpUntil(delegate{return grid.Rows.Count==1;},20000,"visibility fixture not loaded");
+                string id=(string)grid.Rows[0].Tag;NumericUpDown threshold=FormField<NumericUpDown>(form,"_threshold");threshold.Value=7.1254M;
+                ComboBox interval=FormField<ComboBox>(form,"_interval");interval.SelectedIndex=2;
+                Dictionary<string,AdapterConfig> adapters=FormField<Dictionary<string,AdapterConfig>>(form,"_adapters");
+                HashSet<string> editedAdapters=FormField<HashSet<string>>(form,"_editedAdapters");
+                adapters[id]=new AdapterConfig{type="custom",path="/fixture-balance",remainingPath="data.balance",unit="USD",balanceKind="account",divisor=1};editedAdapters.Add(id);
+                Button hide=FormField<Button>(form,"_hideButton"),hidden=FormField<Button>(form,"_hiddenButton");AssertActionReachable(hide);hide.PerformClick();
+                PumpUntil(delegate{return grid.Rows.Count==0 && hidden.Text.Contains("(1)");},10000,"remove did not update list");AssertActionReachable(hidden);
+                if(Volatile.Read(ref settingsEvents)!=0 || !editedAdapters.Contains(id) || !FormField<HashSet<string>>(form,"_editedThresholds").Contains(id))throw new Exception("remove cleared unsaved settings");
+                bool restored=false;Exception modalError=null;DateTime deadline=DateTime.UtcNow.AddSeconds(12);bool clicked=false;
+                using(System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer())
+                {
+                    timer.Interval=100;timer.Tick+=delegate {
+                        foreach(Form window in Application.OpenForms)
+                            if(window.GetType().Name=="HiddenProvidersDialog")
+                            {
+                                try
+                                {
+                                    if(!clicked){Button restore=(Button)window.GetType().GetField("_restoreButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(window);AssertActionReachable(restore);clicked=true;restore.PerformClick();}
+                                    if(grid.Rows.Count==1 && hidden.Text.Contains("(0)")){restored=true;timer.Stop();window.Close();return;}
+                                    if(DateTime.UtcNow>deadline)throw new Exception("restore did not update list");
+                                }
+                                catch(Exception ex){modalError=ex;timer.Stop();window.Close();return;}
+                                break;
+                            }
+                    };
+                    timer.Start();hidden.PerformClick();timer.Stop();
+                }
+                if(modalError!=null)throw modalError;if(!restored)throw new Exception("restore dialog not opened");
+                if(threshold.Value!=7.1254M || interval.SelectedIndex!=2 || adapters[id].type!="custom" || !editedAdapters.Contains(id) || Volatile.Read(ref settingsEvents)!=0)throw new Exception("restore lost unsaved settings");
+                AssertActionReachable(hide);
+                ContextMenuStrip menu=FormField<ContextMenuStrip>(form,"_trayMenu");menu.Items[3].PerformClick();Application.DoEvents();if(!form.IsDisposed||backend.IsRunning)throw new Exception("visibility UI cleanup");
+            }
+            RunFixtureScript(runtime,"const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync("+fixtureLiteral+",{readOnly:true});const row=d.prepare('SELECT settings_config FROM providers WHERE id=?').get('desktop-visibility');if(!row||JSON.parse(row.settings_config).base_url!=='https://fixture.invalid')process.exit(1);d.close();");
+            RunFixtureScript(runtime,"const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync("+fixtureLiteral+");d.prepare('DELETE FROM providers WHERE id=?').run('desktop-visibility');d.close();");
         }
         private static int SelfTest(string directory)
         {
@@ -254,7 +365,8 @@ namespace RelayBalanceDesktop
                     if(notifications.Checked)throw new Exception("notification reload");
                 }
                 TestProviderActions();
-                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\",\"wrapped provider names and apps fit after refresh and resize\"]}",new UTF8Encoding(false));
+                TestBalancePresentation();TestVisibilityLifecycle(runtime,fixture);
+                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\",\"wrapped provider names and apps fit after refresh and resize\",\"content title removed\",\"hidden providers validated\",\"remove and restore through actual buttons\",\"visibility preserves unsaved settings\",\"visibility does not modify CC Switch\",\"unlimited key is not an account balance\",\"real account balance and unlimited subscription preserved\"]}",new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception ex) { File.WriteAllText(report,new JavaScriptSerializer().Serialize(new {passed=false,error=ex.Message}),new UTF8Encoding(false));return 1; }
