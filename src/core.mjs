@@ -326,11 +326,12 @@ export class Monitor {
     if (!idPattern.test(id)) throw new QueryError('invalid_id', '配置标识无效');
     if (!this.reconcile()) return this.snapshot();
     const entry = this.entries.get(id);
-    if (!entry || entry.state.status !== 'unsupported' || entry.adapter.type !== 'auto') throw new QueryError('invalid_detection', '仅待识别的自动查询配置可以继续识别');
+    if (!entry || !['unsupported','error','stale'].includes(entry.state.status) || entry.credential.blockedReason) throw new QueryError('invalid_detection', '仅适配或查询失败的配置可以重试');
+    if (entry.retryAt > Date.now()) throw new QueryError('rate_limit', '站点要求等待，限流结束后才能重试');
     if (Date.now() - (entry.lastManualDetection || 0) < 10000) throw new QueryError('retry_soon', '请等待 10 秒后再继续识别');
     entry.lastManualDetection = Date.now();
     entry.paused = false; entry.needsQuery = true; entry.autoAdapter = null; entry.lastAttempt = 0;
-    entry.state.status = 'pending'; entry.state.message = '正在重新检测已支持的余额协议';
+    entry.state.status = 'pending'; entry.state.message = entry.adapter.type === 'auto' ? '正在重新检测已支持的余额协议' : '正在按已保存的手动配置重试查询';
     return this.refresh({ changedOnly: true });
   }
   async refresh({ force = false, changedOnly = false } = {}) {

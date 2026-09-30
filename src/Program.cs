@@ -15,8 +15,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("自动发现 CC Switch 配置的本地 API 余额监控")]
 [assembly: AssemblyCompany("Relay Balance contributors")]
 [assembly: AssemblyProduct("Relay Balance Desktop")]
-[assembly: AssemblyVersion("1.1.1.0")]
-[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.2.0")]
 
 namespace RelayBalanceDesktop
 {
@@ -71,7 +71,7 @@ namespace RelayBalanceDesktop
                 checkedAt = time, intervalSeconds = 300, refreshing = false,
                 providers = new List<ProviderSnapshot>
                 {
-                    new ProviderSnapshot { id="p-00000000000000000001",name="示例中转 A",app="codex",origin="https://relay-a.example",status="ok",remaining=26.7500,unit="USD",todayUsage=1.2500,totalUsage=73.25,threshold=5,current=true,adapter="sub2api",adapterLabel="Sub2API",balanceKindLabel="账户钱包余额",message="示例数据；余额来自站点接口，用量为当前 API Key 实际花费",updatedAt=time,lastSuccessAt=time },
+                    new ProviderSnapshot { id="p-00000000000000000001",name="示例中转 A · 高级套餐 · 团队共享账户",app="codex",origin="https://relay-a.example",status="ok",remaining=26.7500,unit="USD",todayUsage=1.2500,totalUsage=73.25,threshold=5,current=true,adapter="sub2api",adapterLabel="Sub2API",balanceKindLabel="账户钱包余额",message="示例数据；余额来自站点接口，用量为当前 API Key 实际花费",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000002",name="示例中转 B",app="claude",origin="https://relay-b.example",status="ok",remaining=118.4000,unit="CNY",totalUsage=482.10,threshold=5,adapter="newapi-token",adapterLabel="New API · Key 额度",balanceKindLabel="API Key 剩余额度",message="示例数据；按站点公布比例换算，非账户钱包",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000003",name="备用账户",app="codex",origin="https://relay-a.example",status="ok",remaining=4.6500,unit="USD",todayUsage=0,totalUsage=95.35,threshold=5,lowBalance=true,adapter="sub2api",adapterLabel="Sub2API",balanceKindLabel="账户钱包余额",message="示例数据；同站点不同配置分别显示",updatedAt=time,lastSuccessAt=time },
                     new ProviderSnapshot { id="p-00000000000000000004",name="未设 Key 限额",app="gemini",origin="https://relay-c.example",status="ok",remaining=null,unit="quota",threshold=5,unlimited=true,adapter="newapi-token",adapterLabel="New API · Key 额度",balanceKindLabel="API Key 剩余额度",message="此 Key 未设限额，不代表账户资金无限",updatedAt=time,lastSuccessAt=time },
@@ -96,6 +96,10 @@ namespace RelayBalanceDesktop
                 AssertActionReachable((Button)typeof(BalanceForm).GetField("_retryDetectionButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form));
                 AssertActionReachable((Button)typeof(BalanceForm).GetField("_adapterButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form));
                 SavePreview(form, Path.Combine(directory,"adaptation-preview.png"));
+                failed.status="error";failed.message="示例：连接暂时失败，可点击“适配”重试";
+                form.ApplySnapshot(failedFirst);Application.DoEvents();
+                AssertActionReachable((Button)typeof(BalanceForm).GetField("_retryDetectionButton",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(form));
+                SavePreview(form,Path.Combine(directory,"query-retry-preview.png"));
                 form.Close();
             }
             return 0;
@@ -153,6 +157,30 @@ namespace RelayBalanceDesktop
                 }
                 if(modalError!=null)throw modalError;
                 if(!opened)throw new Exception("manual configuration did not open");
+                foreach(string failedStatus in new string[]{"error","stale"})
+                {
+                    snapshot.providers[0].status=failedStatus;
+                    snapshot.providers[0].adapterConfig=new AdapterConfig { type="custom",path="/balance",remainingPath="data.balance",unit="USD",balanceKind="account",divisor=1 };
+                    form.ApplySnapshot(snapshot);Application.DoEvents();AssertActionReachable(retry);AssertActionReachable(manual);
+                }
+                snapshot.providers[0].status="unsupported";snapshot.providers[0].adapterConfig=new AdapterConfig{type="auto"};
+                snapshot.providers[0].name="长名称中转站示例 · 多项目开发与研究团队共享的高级账户 · 按站点配置完整展示名称与应用类型";
+                snapshot.providers[1].name="短名称";
+                form.ApplySnapshot(snapshot);Application.DoEvents();
+                foreach(int width in new int[]{form.Width,form.Width+300,form.MinimumSize.Width})
+                {
+                    form.Width=width;Application.DoEvents();
+                    for(int round=0;round<2;round++)
+                    {
+                        form.ApplySnapshot(snapshot);Application.DoEvents();
+                        for(int i=0;i<grid.Rows.Count;i++)
+                        {
+                            int required=grid.Rows[i].GetPreferredHeight(i,DataGridViewAutoSizeRowMode.AllCellsExceptHeader,true);
+                            if(grid.Rows[i].Height<required)throw new Exception("provider row clips wrapped name or app");
+                        }
+                        if(grid.Rows[0].Height<=grid.Rows[1].Height)throw new Exception("long provider name does not expand its row");
+                    }
+                }
                 form.Close();
             }
         }
@@ -226,7 +254,7 @@ namespace RelayBalanceDesktop
                     if(notifications.Checked)throw new Exception("notification reload");
                 }
                 TestProviderActions();
-                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\"]}",new UTF8Encoding(false));
+                File.WriteAllText(report,"{\"passed\":true,\"checks\":[\"embedded runtime integrity\",\"empty database isolation\",\"dynamic providers\",\"settings persistence\",\"child process cleanup\",\"snapshot validation\",\"minimize to tray\",\"restore from tray\",\"close to tray\",\"tray exit and worker cleanup\",\"notification preference persistence\",\"adaptation and manual buttons reachable after selection refresh and resize\",\"manual configuration opens\",\"wrapped provider names and apps fit after refresh and resize\"]}",new UTF8Encoding(false));
                 return 0;
             }
             catch (Exception ex) { File.WriteAllText(report,new JavaScriptSerializer().Serialize(new {passed=false,error=ex.Message}),new UTF8Encoding(false));return 1; }

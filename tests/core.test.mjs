@@ -360,15 +360,13 @@ test('explicit detection retries only the selected unsupported account and prese
   assert.equal(monitor.snapshot().providers[0].remaining, 9); assert.equal(monitor.snapshot().providers[1].status, 'unsupported'); assert.equal(JSON.stringify(monitor.settings), before);
 });
 
-test('explicit detection rejects malformed, removed, resolved or manually configured entries', async () => {
+test('explicit detection rejects malformed, removed and already resolved entries', async () => {
   let rows = [row('a')], calls = 0;
   const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials(rows), queryFn: async () => { calls++; return parsed(5); } });
   await monitor.refresh(); const id = monitor.snapshot().providers[0].id;
   for (const invalid of [undefined, null, '', 'constructor', 'https://other.example', 'p-00000000000000000000', id]) await assert.rejects(monitor.retryDetection(invalid));
   assert.equal(calls, 1);
   rows = []; await assert.rejects(monitor.retryDetection(id)); assert.equal(calls, 1);
-  const manual = new Monitor({ ...emptySettings(), adapters: { [id]: { type: 'sub2api' } } }, { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => { throw new QueryError('unsupported', '不可用'); } });
-  await manual.refresh(); await assert.rejects(manual.retryDetection(id));
 });
 
 test('key and adapter changes resume detection while display-name changes stay paused', async () => {
@@ -406,4 +404,62 @@ test('a previously supported adapter that disappears becomes unresolved without 
   await monitor.refresh(); available = false; await monitor.refresh({ force: true });
   const result = monitor.snapshot().providers[0]; assert.equal(result.status, 'unsupported'); assert.equal(result.remaining, null); assert.equal(result.lastSuccessAt, null); assert.equal(result.lowBalance, false);
   await monitor.refresh({ force: true }); assert.equal(calls, 3);
+});
+
+test('automatic adaptation can retry a query error and recover without zeroing the balance', async () => {
+  let recover = false; const received = [];
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async (_c, adapter) => {
+    received.push(adapter); if (!recover) throw new QueryError('invalid_key', '无查询权限'); return { ...parsed(7), adapter: 'newapi-token' };
+  } });
+  await monitor.refresh(); const failed = monitor.snapshot().providers[0]; assert.equal(failed.status, 'error'); assert.equal(failed.remaining, null); assert.equal(failed.lowBalance, false);
+  recover = true; await monitor.retryDetection(failed.id); const recovered = monitor.snapshot().providers[0];
+  assert.deepEqual(received, [{ type: 'auto' }, { type: 'auto' }]); assert.equal(recovered.status, 'ok'); assert.equal(recovered.remaining, 7); assert.ok(recovered.lastSuccessAt);
+});
+
+test('retrying stale automatic data preserves success time until a newly detected result arrives', async () => {
+  let step = 0, release; const gate = new Promise(resolve => { release = resolve; }); const adapters = [];
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async (_c, adapter) => {
+    adapters.push(adapter); if (step === 0) return { ...parsed(2), adapter: 'sub2api' };
+    if (step === 1) throw new QueryError('network_error', '暂时失败'); await gate; return { ...parsed(12), adapter: 'newapi-token' };
+  } });
+  await monitor.refresh(); const first = monitor.snapshot().providers[0]; step = 1; await monitor.refresh({ force: true });
+  const stale = monitor.snapshot().providers[0]; assert.equal(stale.status, 'stale'); assert.equal(stale.remaining, 2); assert.equal(stale.lastSuccessAt, first.lastSuccessAt);
+  step = 2; const retry = monitor.retryDetection(first.id); await new Promise(setImmediate);
+  const pending = monitor.snapshot().providers[0]; assert.equal(pending.status, 'pending'); assert.equal(pending.remaining, 2); assert.equal(pending.lastSuccessAt, first.lastSuccessAt); assert.equal(pending.lowBalance, false);
+  await new Promise(resolve => setTimeout(resolve, 10)); release(); await retry; const refreshed = monitor.snapshot().providers[0];
+  assert.deepEqual(adapters, [{ type: 'auto' }, { type: 'sub2api' }, { type: 'auto' }]); assert.equal(refreshed.status, 'ok'); assert.equal(refreshed.remaining, 12); assert.ok(Date.parse(refreshed.lastSuccessAt) > Date.parse(first.lastSuccessAt)); assert.equal(refreshed.updatedAt, refreshed.lastSuccessAt);
+});
+
+test('manual and custom adaptation retries keep their saved mapping and thresholds', async () => {
+  for (const mapping of [{ type: 'sub2api' }, { type: 'custom', path: '/account/balance', remainingPath: 'data.remaining', unit: 'CNY', divisor: 100, balanceKind: 'account' }]) {
+    const id = credentials()[0].id; const settings = { ...emptySettings(), thresholds: { [id]: 3 }, adapters: { [id]: mapping } }; const received = []; let recover = false;
+    const monitor = new Monitor(settings, { discoverFn: () => selectCredentials([row('a')]), queryFn: async (_c, adapter) => { received.push(structuredClone(adapter)); if (!recover) throw new QueryError('schema_error', '接口响应格式已变化'); return mapping.type === 'custom' ? parseCustom({ data: { remaining: 1250 } }, adapter) : parsed(12.5); } });
+    await monitor.refresh(); assert.equal(monitor.snapshot().providers[0].status, 'error'); const saved = JSON.stringify(monitor.settings);
+    recover = true; await monitor.retryDetection(id); const result = monitor.snapshot().providers[0];
+    assert.deepEqual(received, [mapping, mapping]); assert.equal(JSON.stringify(monitor.settings), saved); assert.deepEqual(result.adapterConfig, mapping); assert.equal(result.threshold, 3); assert.equal(result.remaining, 12.5); assert.equal(result.status, 'ok');
+  }
+});
+
+test('authentication failure during adaptation retains old money only as stale data', async () => {
+  let fail = false;
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => { if (fail) throw new QueryError('invalid_key', '权限失效'); return parsed(3); } });
+  await monitor.refresh(); const first = monitor.snapshot().providers[0]; fail = true; await monitor.refresh({ force: true }); await monitor.retryDetection(first.id);
+  const result = monitor.snapshot().providers[0]; assert.equal(result.status, 'stale'); assert.equal(result.remaining, 3); assert.equal(result.lastSuccessAt, first.lastSuccessAt); assert.equal(result.lowBalance, false);
+});
+
+test('query errors with Retry-After reject adaptation until the upstream deadline', async t => {
+  let now = Date.now(), calls = 0; t.mock.method(Date, 'now', () => now);
+  const monitor = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('a')]), queryFn: async () => { calls++; if (calls === 1) throw new QueryError('rate_limit', '限流', 120); return parsed(11); } });
+  await monitor.refresh(); const id = monitor.snapshot().providers[0].id; assert.equal(monitor.snapshot().providers[0].status, 'error');
+  await assert.rejects(monitor.retryDetection(id), { code: 'rate_limit' }); await monitor.refresh({ force: true }); assert.equal(calls, 1);
+  now += 120000; await monitor.retryDetection(id); assert.equal(calls, 2); assert.equal(monitor.snapshot().providers[0].remaining, 11);
+});
+
+test('missing credentials and an already pending query cannot start adaptation', async () => {
+  let calls = 0;
+  const missing = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('missing', undefined, ' ')]), queryFn: async () => { calls++; return parsed(1); } });
+  await missing.refresh(); const absent = missing.snapshot().providers[0]; assert.equal(absent.status, 'missing'); await assert.rejects(missing.retryDetection(absent.id)); assert.equal(calls, 0);
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const pending = new Monitor(emptySettings(), { discoverFn: () => selectCredentials([row('pending')]), queryFn: async () => { calls++; await gate; return parsed(1); } });
+  const initial = pending.refresh(); await new Promise(setImmediate); await assert.rejects(pending.retryDetection(pending.snapshot().providers[0].id)); release(); await initial; assert.equal(calls, 1);
 });

@@ -61,8 +61,9 @@ namespace RelayBalanceDesktop
         {
             float scale; using (Graphics graphics = CreateGraphics()) scale = graphics.DpiY / 96F;
             _grid.ColumnHeadersHeight = (int)Math.Ceiling(38F * scale);
-            _grid.RowTemplate.Height = (int)Math.Ceiling(54F * scale);
-            _grid.DefaultCellStyle.Padding = new Padding((int)Math.Round(10F * scale), (int)Math.Round(6F * scale), 0, (int)Math.Round(6F * scale));
+            _grid.RowTemplate.MinimumHeight = (int)Math.Ceiling(68F * scale);
+            _grid.RowTemplate.Height = _grid.RowTemplate.MinimumHeight;
+            _grid.DefaultCellStyle.Padding = new Padding((int)Math.Round(10F * scale), (int)Math.Round(10F * scale), 0, (int)Math.Round(10F * scale));
             _grid.ColumnHeadersDefaultCellStyle.Padding = new Padding((int)Math.Round(10F * scale), 0, 0, 0);
             foreach (DataGridViewColumn column in _grid.Columns) column.MinimumWidth = (int)Math.Ceiling(column.MinimumWidth * scale);
             _contentMinimum = new Size((int)Math.Ceiling(1048F * scale), (int)Math.Ceiling(580F * scale));
@@ -98,7 +99,7 @@ namespace RelayBalanceDesktop
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 199F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 67F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58F)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
             Controls.Add(layout);
             Panel header = new Panel(); header.Size = new Size(1072, 82); header.Dock = DockStyle.Fill; header.Margin = Padding.Empty;
             header.Controls.Add(LabelAt("中转站余额", 0, 0, 500, 37, 22F, FontStyle.Bold, Ink));
@@ -121,8 +122,9 @@ namespace RelayBalanceDesktop
             _grid.ColumnHeadersDefaultCellStyle.Font = new Font(Font, FontStyle.Bold); _grid.ColumnHeadersDefaultCellStyle.Padding = new Padding(10, 0, 0, 0);
             _grid.DefaultCellStyle.BackColor = Color.White; _grid.DefaultCellStyle.ForeColor = Ink;
             _grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(226, 245, 240); _grid.DefaultCellStyle.SelectionForeColor = Ink;
-            _grid.DefaultCellStyle.Padding = new Padding(10, 6, 0, 6); _grid.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
-            _grid.RowTemplate.Height = 54;
+            _grid.DefaultCellStyle.Padding = new Padding(10, 10, 0, 10); _grid.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+            _grid.RowTemplate.MinimumHeight = 68; _grid.RowTemplate.Height = 68;
+            _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders;
             AddColumn("provider", "配置 / 应用", 177, 154); AddColumn("origin", "中转站地址", 191, 140);
             AddColumn("balance", "余额 / 单位", 132, 117); AddColumn("kind", "余额范围", 103, 88);
             AddColumn("adapter", "查询适配", 139, 110); AddColumn("status", "状态", 127, 110); AddColumn("updated", "最近更新", 117, 104);
@@ -164,13 +166,16 @@ namespace RelayBalanceDesktop
             _notifications = new CheckBox(); _notifications.Location = new Point(247, 13); _notifications.Size = new Size(236, 29);
             _notifications.Text = "启用桌面低余额提醒"; _notifications.Checked = _preview || LoadNotifications();
             _notifications.CheckedChanged += delegate { SaveNotifications(); }; global.Controls.Add(_notifications);
-            global.Controls.Add(LabelAt("关闭窗口后继续在托盘刷新", 495, 13, 335, 29, 9F, FontStyle.Regular, Muted));
             _saveButton = ActionButton("保存设置", 919, 9, 153, 38); _saveButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             _saveButton.Click += delegate { SaveSettings(); }; global.Controls.Add(_saveButton); layout.Controls.Add(global, 0, 4);
-            Panel footer = new Panel(); footer.Size = new Size(1072, 50); footer.Dock = DockStyle.Fill; footer.Margin = Padding.Empty;
-            _checkedLabel = LabelAt("最近查询：尚未查询", 1, 0, 1068, 21, 8.5F, FontStyle.Regular, Muted); _checkedLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right; footer.Controls.Add(_checkedLabel);
-            _messageLabel = LabelAt("本机读取配置。右键托盘图标选择“退出”可彻底关闭。", 1, 24, 1068, 22, 8.5F, FontStyle.Regular, Muted);
-            _messageLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right; footer.Controls.Add(_messageLabel); layout.Controls.Add(footer, 0, 5);
+            TableLayoutPanel footer = new TableLayoutPanel(); footer.Dock = DockStyle.Fill; footer.Margin = Padding.Empty; footer.ColumnCount = 1; footer.RowCount = 3;
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100F));
+            footer.RowStyles.Add(new RowStyle(SizeType.Absolute,21F)); footer.RowStyles.Add(new RowStyle(SizeType.Absolute,22F)); footer.RowStyles.Add(new RowStyle(SizeType.Percent,100F));
+            _checkedLabel = LabelAt("最近查询：尚未查询", 0, 0, 1068, 21, 8.5F, FontStyle.Regular, Muted); _checkedLabel.Dock = DockStyle.Fill; _checkedLabel.Margin = Padding.Empty; footer.Controls.Add(_checkedLabel,0,0);
+            Label backgroundHint = LabelAt("使用说明：关闭窗口后仍会在后台更新余额。双击电脑右下角的小图标可打开窗口；右键它，选择“退出”可彻底关闭程序。",0,0,1068,22,8.5F,FontStyle.Regular,Muted);
+            backgroundHint.Dock = DockStyle.Fill; backgroundHint.Margin = Padding.Empty; footer.Controls.Add(backgroundHint,0,1); _tips.SetToolTip(backgroundHint,backgroundHint.Text);
+            _messageLabel = LabelAt("已连接本机 CC Switch 配置。", 0, 0, 1068, 22, 8.5F, FontStyle.Regular, Muted); _messageLabel.Dock = DockStyle.Fill; _messageLabel.Margin = Padding.Empty;
+            footer.Controls.Add(_messageLabel,0,2); layout.Controls.Add(footer, 0, 5);
         }
         private void AddColumn(string name, string heading, float weight, int minimum)
         {
@@ -201,7 +206,7 @@ namespace RelayBalanceDesktop
         public void ShowFromTray() { RunOnUi(delegate { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }); }
         private void HideToTray(bool explain)
         {
-            Hide(); if (explain && !_trayHintShown && _tray != null) { _trayHintShown = true; _tray.ShowBalloonTip(3000, "中转站余额仍在运行", "后台会继续刷新。双击托盘图标打开，右键选择“退出”可彻底关闭。", ToolTipIcon.Info); }
+            Hide(); if (explain && !_trayHintShown && _tray != null) { _trayHintShown = true; _tray.ShowBalloonTip(3000, "中转站余额仍在后台运行", "双击电脑右下角的小图标可打开窗口；右键它，选择“退出”可彻底关闭程序。", ToolTipIcon.Info); }
         }
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
@@ -254,6 +259,8 @@ namespace RelayBalanceDesktop
             _refreshButton.Enabled = !data.refreshing; _refreshButton.Text = data.refreshing ? "正在刷新…" : "立即刷新";
             MergeSettings(data); string preserveId = _selectedId; int scroll = _grid.FirstDisplayedScrollingRowIndex;
             _updatingGrid = true; _grid.SuspendLayout();
+            // Measure once after the batch. Native auto sizing then follows later column-width changes.
+            _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None;
             try
             {
                 _providers.Clear(); _grid.Rows.Clear(); int good = 0, needsAttention = 0, selectedIndex = -1;
@@ -273,6 +280,7 @@ namespace RelayBalanceDesktop
                         if (p.status == "ok") good++; else if (p.status != "pending" && p.status != "disabled") needsAttention++;
                         if (String.Equals(p.id, preserveId, StringComparison.Ordinal)) selectedIndex = index; HandleLowBalance(p);
                     }
+                _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders;
                 _grid.ClearSelection();
                 if (_grid.Rows.Count > 0)
                 {
@@ -286,10 +294,10 @@ namespace RelayBalanceDesktop
                 _summaryLabel.Text = "已发现 " + _providers.Count.ToString(CultureInfo.InvariantCulture) + " 个配置    ·    " + good.ToString(CultureInfo.InvariantCulture) + " 个已更新" + (needsAttention > 0 ? "    ·    " + needsAttention.ToString(CultureInfo.InvariantCulture) + " 个需关注" : "") + "    ·    ● 当前使用";
                 List<string> removed = new List<string>(); foreach (string id in _lastLow.Keys) if (!_providers.ContainsKey(id)) removed.Add(id); foreach (string id in removed) _lastLow.Remove(id);
             }
-            finally { _grid.ResumeLayout(); _updatingGrid = false; }
+            finally { _grid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCellsExceptHeaders; _grid.ResumeLayout(); _updatingGrid = false; }
             ShowSelection();
             _checkedLabel.Text = "最近查询：" + LocalDate(data.checkedAt, true) + "    ·    " + IntervalText(data.intervalSeconds) + "自动刷新    ·    配置变更自动检测";
-            if (!SettingsDirty && !_waitingForSettings) SetMessage(!String.IsNullOrWhiteSpace(data.message) ? data.message : (data.refreshing ? "正在查询配置的中转站，请稍候…" : "本机读取配置。右键托盘图标选择“退出”可彻底关闭。"), String.IsNullOrWhiteSpace(data.message) ? Muted : Warning);
+            if (!SettingsDirty && !_waitingForSettings) SetMessage(!String.IsNullOrWhiteSpace(data.message) ? data.message : (data.refreshing ? "正在查询配置的中转站，请稍候…" : "余额已更新，配置变化会自动检测。"), String.IsNullOrWhiteSpace(data.message) ? Muted : Warning);
         }
         private void MergeSettings(Snapshot data)
         {
@@ -329,9 +337,10 @@ namespace RelayBalanceDesktop
             AdapterConfig config; _adapters.TryGetValue(p.id, out config);
             _selectedAdapter.Text = "查询适配：" + AdapterName(config == null ? "auto" : config.type) + (_editedAdapters.Contains(p.id) ? "（待保存）" : ""); _tips.SetToolTip(_selectedAdapter, _selectedAdapter.Text);
             bool unresolved = p.status == "unsupported";
-            _retryDetectionButton.Visible = unresolved;
-            _retryDetectionButton.Enabled = unresolved && !_waitingForSettings && !_refreshing && !_editedAdapters.Contains(p.id) && (p.adapterConfig == null || p.adapterConfig.type == "auto");
-            _tips.SetToolTip(_retryDetectionButton, _editedAdapters.Contains(p.id) ? "查询适配已修改，请先保存设置，再重新适配。" : "重新尝试已支持的余额协议；不会执行脚本或登录网站。");
+            bool retryable = unresolved || p.status == "error" || p.status == "stale";
+            _retryDetectionButton.Visible = retryable;
+            _retryDetectionButton.Enabled = retryable && !_waitingForSettings && !_refreshing && !_editedAdapters.Contains(p.id);
+            _tips.SetToolTip(_retryDetectionButton, _editedAdapters.Contains(p.id) ? "查询适配已修改，请先保存设置，再重新适配。" : "重新检测所选站点；已有手动配置会保留，并按该配置重试。不会执行脚本或登录网站。");
             _adapterButton.Text = "手动配置…";
             _details.Text = StatusText(p) + (String.IsNullOrWhiteSpace(p.message) ? "" : " · " + p.message) + "\r\n今日实际用量：" + OptionalAmount(p.todayUsage, p.unit) + "    累计实际用量：" + OptionalAmount(p.totalUsage, p.unit)
                 + "\r\n最近查询：" + LocalDate(p.updatedAt, true) + "    最近成功：" + LocalDate(p.lastSuccessAt, true);
@@ -340,14 +349,15 @@ namespace RelayBalanceDesktop
                 + "\r\n重新适配会检测已支持的余额协议。API 地址和 API Key 自动读取 CC Switch。"
                 + "\r\n已暂停定时适配；配置更改后会自动重新检测。"
                 + "\r\n" + (_editedAdapters.Contains(p.id) ? "适配方式已修改，请先保存设置。" : "最近查询：" + LocalDate(p.updatedAt, true));
+            else if(retryable) _details.Text = "可点击“适配”重试所选站点，或使用“手动配置…”。已有手动配置会保留。\r\n" + _details.Text;
             _tips.SetToolTip(_details, _details.Text);
         }
         private void RetryDetection()
         {
             if (_preview || _waitingForSettings || _refreshing || _selectedId == null || _editedAdapters.Contains(_selectedId)) return;
-            ProviderSnapshot p; if (!_providers.TryGetValue(_selectedId, out p) || p.status != "unsupported") return;
+            ProviderSnapshot p; if (!_providers.TryGetValue(_selectedId, out p) || (p.status != "unsupported" && p.status != "error" && p.status != "stale")) return;
             _retryDetectionButton.Enabled = false; _refreshing = true; _refreshButton.Enabled = false; _refreshButton.Text = "正在适配…";
-            SetMessage("正在重新适配所选配置，检测已支持的余额协议…", Muted);
+            SetMessage("正在重新检测所选站点，已有手动配置会保留…", Muted);
             try { _client.RetryDetection(_selectedId); } catch { OnErrorReceived("适配未完成，请稍后重试。"); }
         }
         private void ConfigureAdapter()
