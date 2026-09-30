@@ -1,0 +1,32 @@
+name: Offline tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run tests with fixtures and mocked HTTP
+        run: node --test tests/*.test.mjs
+      - name: Build the Windows application
+        run: .\build.ps1 -OutputPath .\dist\RelayBalance.exe
+      - name: Run isolated desktop self-test
+        shell: powershell
+        run: |
+          $fixtureDirectory = Join-Path $env:RUNNER_TEMP ('relay-balance-' + [Guid]::NewGuid().ToString('N'))
+          $app = Start-Process .\dist\RelayBalance.exe -ArgumentList '--self-test', ('"' + $fixtureDirectory + '"') -WindowStyle Hidden -Wait -PassThru
+          Get-Content (Join-Path $fixtureDirectory 'desktop-test.json')
+          if ($app.ExitCode -ne 0) { throw 'Desktop self-test failed.' }

@@ -1,0 +1,9 @@
+build/
+dist/
+*.exe
+*.exe.sha256
+*.db
+*.db-*
+*.log
+state/
+runtime/
