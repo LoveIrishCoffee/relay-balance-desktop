@@ -11,17 +11,18 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("中转站余额")]
+[assembly: AssemblyTitle("中转站余额查询")]
 [assembly: AssemblyDescription("自动发现 CC Switch 配置的本地 API 余额监控")]
 [assembly: AssemblyCompany("Relay Balance contributors")]
 [assembly: AssemblyProduct("Relay Balance Desktop")]
-[assembly: AssemblyVersion("1.1.4.0")]
-[assembly: AssemblyFileVersion("1.1.4.0")]
+[assembly: AssemblyVersion("1.1.5.0")]
+[assembly: AssemblyFileVersion("1.1.5.0")]
 
 namespace RelayBalanceDesktop
 {
     public static class Program
     {
+        public const string AppName = "中转站余额查询";
         public static Icon AppIcon;
         private static string dataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RelayBalanceDesktop");
         public static string DataDirectory { get { return dataDirectory; } }
@@ -55,7 +56,7 @@ namespace RelayBalanceDesktop
                             try { if (form.IsHandleCreated && !form.IsDisposed) form.BeginInvoke((Action)form.ShowFromTray); } catch { }
                         }
                     });
-                    Application.ThreadException += delegate { MessageBox.Show("界面遇到问题，请退出后重新打开。", "中转站余额", MessageBoxButtons.OK, MessageBoxIcon.Warning); };
+                    Application.ThreadException += delegate { MessageBox.Show("界面遇到问题，请退出后重新打开。", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); };
                     try { Application.Run(form); }
                     finally { Volatile.Write(ref exiting, true); signal.Set(); signalListener.Wait(1000); backend.Stop(); instance.ReleaseMutex(); }
                 }

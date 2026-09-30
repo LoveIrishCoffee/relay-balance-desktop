@@ -50,7 +50,7 @@ namespace RelayBalanceDesktop
         {
             if (client == null) throw new ArgumentNullException("client");
             SuspendLayout(); _client = client; _preview = preview;
-            Text = "中转站余额"; Icon = Program.AppIcon; StartPosition = FormStartPosition.CenterScreen;
+            Text = Program.AppName; Icon = Program.AppIcon; StartPosition = FormStartPosition.CenterScreen;
             AutoScaleMode = AutoScaleMode.None;
             Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
             BackColor = Color.FromArgb(244, 247, 250); ForeColor = Ink;
@@ -183,7 +183,7 @@ namespace RelayBalanceDesktop
             footer.RowStyles.Add(new RowStyle(SizeType.Absolute,21F)); footer.RowStyles.Add(new RowStyle(SizeType.Absolute,22F)); footer.RowStyles.Add(new RowStyle(SizeType.Percent,100F));
             _checkedLabel = LabelAt("最近查询：尚未查询", 0, 0, 1068, 21, 8.5F, FontStyle.Regular, Muted); _checkedLabel.Dock = DockStyle.Fill; _checkedLabel.Margin = Padding.Empty; footer.Controls.Add(_checkedLabel,0,0);
             Label backgroundHint = LabelAt("使用说明：关闭窗口后仍会在后台更新余额。双击电脑右下角的小图标可打开窗口；右键它，选择“退出”可彻底关闭程序。",0,0,1068,22,8.5F,FontStyle.Regular,Muted);
-            backgroundHint.Dock = DockStyle.Fill; backgroundHint.Margin = Padding.Empty; footer.Controls.Add(backgroundHint,0,1); _tips.SetToolTip(backgroundHint,backgroundHint.Text);
+            backgroundHint.Dock = DockStyle.Fill; backgroundHint.Margin = Padding.Empty; footer.Controls.Add(backgroundHint,0,1);
             _messageLabel = LabelAt("已连接本机 CC Switch 配置。", 0, 0, 1068, 22, 8.5F, FontStyle.Regular, Muted); _messageLabel.Dock = DockStyle.Fill; _messageLabel.Margin = Padding.Empty;
             footer.Controls.Add(_messageLabel,0,2); layout.Controls.Add(footer, 0, 5);
         }
@@ -196,7 +196,7 @@ namespace RelayBalanceDesktop
         {
             Label label = new Label(); label.Text = text; label.Location = new Point(x, y); label.Size = new Size(width, height);
             label.Font = new Font("Microsoft YaHei UI", size, style, GraphicsUnit.Point); label.ForeColor = color;
-            label.BackColor = Color.Transparent; label.TextAlign = ContentAlignment.MiddleLeft; label.AutoEllipsis = true; return label;
+            label.BackColor = Color.Transparent; label.TextAlign = ContentAlignment.MiddleLeft; label.AutoEllipsis = false; return label;
         }
         private static Button ActionButton(string text, int x, int y, int width, int height)
         {
@@ -215,13 +215,13 @@ namespace RelayBalanceDesktop
             _trayMenu = new ContextMenuStrip(); _trayMenu.Items.Add("打开余额窗口", null, delegate { ShowFromTray(); });
             _trayMenu.Items.Add("立即刷新", null, delegate { RefreshBalances(); }); _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add("退出", null, delegate { _exitRequested = true; Close(); });
-            _tray = new NotifyIcon(); _tray.Icon = Program.AppIcon; _tray.Text = "中转站余额 · 后台运行"; _tray.ContextMenuStrip = _trayMenu;
+            _tray = new NotifyIcon(); _tray.Icon = Program.AppIcon; _tray.Text = Program.AppName + " · 后台运行"; _tray.ContextMenuStrip = _trayMenu;
             _tray.DoubleClick += delegate { ShowFromTray(); }; _tray.BalloonTipClicked += delegate { ShowFromTray(); }; _tray.Visible = true;
         }
         public void ShowFromTray() { RunOnUi(delegate { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }); }
         private void HideToTray(bool explain)
         {
-            Hide(); if (explain && !_trayHintShown && _tray != null) { _trayHintShown = true; _tray.ShowBalloonTip(3000, "中转站余额仍在后台运行", "双击电脑右下角的小图标可打开窗口；右键它，选择“退出”可彻底关闭程序。", ToolTipIcon.Info); }
+            Hide(); if (explain && !_trayHintShown && _tray != null) { _trayHintShown = true; _tray.ShowBalloonTip(3000, Program.AppName + "仍在后台运行", "双击电脑右下角的小图标可打开窗口；右键它，选择“退出”可彻底关闭程序。", ToolTipIcon.Info); }
         }
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
@@ -288,12 +288,10 @@ namespace RelayBalanceDesktop
                         if (p == null || String.IsNullOrEmpty(p.id)) continue; _providers[p.id] = p;
                         int index = _grid.Rows.Add((p.current ? "● " : "") + p.name + "\r\n" + AppLabel(p.app), p.origin ?? "地址未配置", BalanceText(p), BalanceKindText(p), AdapterDisplay(p), StatusText(p), LocalDate(p.status == "stale" ? p.lastSuccessAt : p.updatedAt, false));
                         DataGridViewRow row = _grid.Rows[index]; row.Tag = p.id;
-                        row.Cells[0].ToolTipText = p.name + " / " + AppLabel(p.app) + (p.current ? " · 当前使用" : ""); row.Cells[1].ToolTipText = p.origin ?? "";
                         row.Cells[2].Style.ForeColor = p.status == "stale" ? Muted : (p.status == "ok" && p.lowBalance ? Warning : Ink);
                         row.Cells[2].Style.SelectionForeColor = row.Cells[2].Style.ForeColor;
                         row.Cells[5].Style.ForeColor = p.status == "ok" && !p.lowBalance && !MissingAccountBalance(p) ? Teal : ((p.status == "pending" || p.status == "disabled") ? Muted : Warning);
-                        row.Cells[5].Style.SelectionForeColor = row.Cells[5].Style.ForeColor; row.Cells[5].ToolTipText = p.message ?? "";
-                        row.Cells[6].ToolTipText = "更新：" + LocalDate(p.updatedAt, true) + "\r\n最近成功：" + LocalDate(p.lastSuccessAt, true);
+                        row.Cells[5].Style.SelectionForeColor = row.Cells[5].Style.ForeColor;
                         if (p.current) row.Cells[0].Style.ForeColor = Teal;
                         if (p.status == "ok" && !MissingAccountBalance(p)) good++; else if (p.status != "pending" && p.status != "disabled") needsAttention++;
                         if (String.Equals(p.id, preserveId, StringComparison.Ordinal)) selectedIndex = index; HandleLowBalance(p);
@@ -379,12 +377,12 @@ namespace RelayBalanceDesktop
                 _thresholdUnit.Text = ""; _selectedAdapter.Text = "查询适配：自动检测"; _retryDetectionButton.Visible = false; _adapterButton.Text = "手动配置…";
                 _details.Text = "先在 CC Switch 中添加带有 API 地址的配置。无法自动识别的站点可按站点文档设置查询适配。"; return;
             }
-            _selectedTitle.Text = p.name + "  /  " + AppLabel(p.app) + (p.current ? "  ·  当前使用" : ""); _tips.SetToolTip(_selectedTitle, _selectedTitle.Text + "\r\n" + p.origin);
+            _selectedTitle.Text = p.name + "  /  " + AppLabel(p.app) + (p.current ? "  ·  当前使用" : "");
             _updatingSettings = true; try { double value; if (_thresholds.TryGetValue(p.id, out value)) SetNumericValue(_threshold, value); } finally { _updatingSettings = false; }
             _threshold.Enabled = !_waitingForSettings; _adapterButton.Enabled = !_waitingForSettings; _thresholdUnit.Text = UnitLabel(p.unit); _hideButton.Enabled = !_pendingVisibility.ContainsKey(p.id);
             _tips.SetToolTip(_threshold, "余额小于或等于此值时提醒。支持 USD、CNY、EUR、GBP、JPY、HKD；原始额度暂不触发金额提醒。设为 0 可停用正余额提醒。");
             AdapterConfig config; _adapters.TryGetValue(p.id, out config);
-            _selectedAdapter.Text = "查询适配：" + AdapterName(config == null ? "auto" : config.type) + (_editedAdapters.Contains(p.id) ? "（待保存）" : ""); _tips.SetToolTip(_selectedAdapter, _selectedAdapter.Text);
+            _selectedAdapter.Text = "查询适配：" + AdapterName(config == null ? "auto" : config.type) + (_editedAdapters.Contains(p.id) ? "（待保存）" : "");
             bool unresolved = p.status == "unsupported";
             bool missingBalance = MissingAccountBalance(p);
             bool retryable = unresolved || p.status == "error" || p.status == "stale" || (p.status == "ok" && missingBalance);
@@ -408,7 +406,6 @@ namespace RelayBalanceDesktop
                     + "\r\n可点击“获取余额”重试；读取账户余额需要有效查询凭据，普通 API Key 可能无此权限。"
                     + "\r\n今日实际用量：" + OptionalAmount(p.todayUsage, usageUnit) + "    累计实际用量：" + OptionalAmount(p.totalUsage, usageUnit)
                     + "\r\n最近查询：" + LocalDate(p.updatedAt, true);
-            _tips.SetToolTip(_details, _details.Text);
         }
         private void RetryDetection()
         {
@@ -473,7 +470,7 @@ namespace RelayBalanceDesktop
                 if (_hiddenDialog != null && !_hiddenDialog.IsDisposed) { _hiddenDialog.UpdateProviders(_hiddenProviders, _pendingVisibility); if (visibilityFailed) _hiddenDialog.ShowError("恢复未完成，请重新尝试。"); }
                 ShowSelection(); SetMessage(String.IsNullOrWhiteSpace(message) ? "操作未完成，请稍后重试。" : message, Warning); });
         }
-        private void SetMessage(string message, Color color) { _messageLabel.Text = message; _messageLabel.ForeColor = color; _tips.SetToolTip(_messageLabel, message); }
+        private void SetMessage(string message, Color color) { _messageLabel.Text = message; _messageLabel.ForeColor = color; }
         private void RunOnUi(Action action)
         {
             if (_stopped || IsDisposed || Disposing) return;
@@ -532,7 +529,7 @@ namespace RelayBalanceDesktop
         }
         private static string IntervalText(int seconds) { return seconds % 60 == 0 ? "每 " + (seconds / 60).ToString(CultureInfo.InvariantCulture) + " 分钟" : "每 " + seconds.ToString(CultureInfo.InvariantCulture) + " 秒"; }
         private sealed class IntervalItem { public readonly int Seconds; public IntervalItem(int seconds) { Seconds = seconds; } public override string ToString() { return IntervalText(Seconds); } }
-        private sealed class BufferedGrid : DataGridView { public BufferedGrid() { DoubleBuffered = true; } }
+        private sealed class BufferedGrid : DataGridView { public BufferedGrid() { DoubleBuffered = true; ShowCellToolTips = false; } }
         private class BorderPanel : Panel
         {
             public BorderPanel() { SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
